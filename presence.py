@@ -42,10 +42,12 @@ class DiscordPresence:
 
         cover_url = self._resolve_cover(track.cover_art)
 
-        state = f"by {track.artist}"
-        details = track.title
+        title = track.title if len(track.title) >= 2 else "Unknown"
+        artist = track.artist if len(track.artist) >= 2 else "Unknown Artist"
+        state = f"by {artist}"
+        details = title
         safe_track = urllib.parse.quote(details[:50], safe="")
-        safe_artist = urllib.parse.quote(track.artist[:30], safe="")
+        safe_artist = urllib.parse.quote(artist[:30], safe="")
         join_secret = f"eternalrp://sync?track={safe_track}&artist={safe_artist}"
         if len(join_secret) > 128:
             join_secret = join_secret[:128]
@@ -67,7 +69,7 @@ class DiscordPresence:
         track_key = f"{details}|{state}"
         if track_key != self._last_track_key:
             self._last_track_key = track_key
-            print(f"Now playing: {details} \u2014 {track.artist}")
+            print(f"Now playing: {details} \u2014 {artist}")
 
         try:
             self._rpc.clear()

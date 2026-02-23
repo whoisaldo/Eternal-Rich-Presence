@@ -1,22 +1,31 @@
 import asyncio
+import sys
+import threading
 from typing import Optional
 
 from .base import BaseProvider, TrackInfo
 
-import sys
-import threading
+# winrt on Python 3.13 fires "Event loop is closed" from a native callback
+# after asyncio.run() has already returned the data.  Suppress via every
+# hook Python exposes for unhandled/unraisable exceptions.
+_orig_threading_hook = threading.excepthook
+_orig_unraisable_hook = sys.unraisablehook
 
-# winrt on Python 3.13 fires a "Event loop is closed" RuntimeError from a
-# background thread after asyncio.run() has already returned the data.
-# Suppress that specific noise so it doesn't print a traceback to the console.
-_orig_excepthook = threading.excepthook
 
-def _quiet_winrt_hook(args):
+def _quiet_threading_hook(args):
     if args.exc_type is RuntimeError and "Event loop is closed" in str(args.exc_value):
         return
-    _orig_excepthook(args)
+    _orig_threading_hook(args)
 
-threading.excepthook = _quiet_winrt_hook
+
+def _quiet_unraisable_hook(unraisable):
+    if isinstance(unraisable.exc_value, RuntimeError) and "Event loop is closed" in str(unraisable.exc_value):
+        return
+    _orig_unraisable_hook(unraisable)
+
+
+threading.excepthook = _quiet_threading_hook
+sys.unraisablehook = _quiet_unraisable_hook
 
 
 class AppleMusicProvider(BaseProvider):
@@ -129,10 +138,18 @@ class AppleMusicProvider(BaseProvider):
             except Exception:
                 return None
 
-        try:
-            return asyncio.run(_fetch())
-        except Exception:
-            return None
+        result = [None]
+
+        def _run_in_thread():
+            try:
+                result[0] = asyncio.run(_fetch())
+            except Exception:
+                pass
+
+        t = threading.Thread(target=_run_in_thread, daemon=True)
+        t.start()
+        t.join(timeout=15)
+        return result[0]
 
     @staticmethod
     async def _read_thumbnail(props) -> bytes | None:

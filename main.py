@@ -174,15 +174,6 @@ def run_host_mode() -> int:
 
     mgr = ProviderManager(provider_list)
 
-    track = mgr.get_now_playing()
-    if track is None:
-        _msgbox(
-            "No active music session found.\n\n"
-            "Play a song in Apple Music or Spotify, then launch again."
-        )
-        return 1
-    print(f"Using {mgr.active_provider.name}.", file=sys.stderr)
-
     try:
         from config import CLIENT_ID
     except ImportError:
@@ -209,14 +200,6 @@ def run_host_mode() -> int:
     from presence import DiscordPresence
 
     dp = DiscordPresence(CLIENT_ID, asset_key=(ASSET_KEY or "apple_music").strip())
-    try:
-        dp.connect()
-    except Exception as e:
-        _msgbox(
-            f"Could not connect to Discord.\n\n"
-            f"Make sure Discord is running and try again.\n\n{e}"
-        )
-        return 1
 
     def _cleanup():
         dp.disconnect()
@@ -232,18 +215,26 @@ def run_host_mode() -> int:
         while not stop_event.is_set():
             if not paused.is_set():
                 try:
-                    t = mgr.get_now_playing()
-                    if t is None:
-                        dp.clear()
-                    else:
-                        name = mgr.active_provider.name if mgr.active_provider else ""
-                        dp.update(t, name)
-                    if tray:
-                        tip = "EternalRichPresence"
-                        if t:
-                            tip = f"{t.title} — {t.artist}"[:63]
-                        tray.title = tip
+                    if dp._rpc is None:
+                        try:
+                            dp.connect()
+                        except Exception:
+                            pass
+
+                    if dp._rpc is not None:
+                        t = mgr.get_now_playing()
+                        if t is None:
+                            dp.clear()
+                        else:
+                            name = mgr.active_provider.name if mgr.active_provider else ""
+                            dp.update(t, name)
+                        if tray:
+                            tip = "EternalRichPresence"
+                            if t:
+                                tip = f"{t.title} — {t.artist}"[:63]
+                            tray.title = tip
                 except Exception as e:
+                    dp._rpc = None
                     print(f"Update error: {e}", file=sys.stderr)
             stop_event.wait(interval)
 
