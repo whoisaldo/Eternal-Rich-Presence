@@ -8,11 +8,9 @@ import atexit
 import hashlib
 import os
 import sys
-import threading
 import time
 import urllib.parse
 import urllib.request
-from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # Set in host mode so atexit can clear presence when script exits (any reason)
 _host_rpc = None
@@ -21,53 +19,6 @@ _host_rpc = None
 _app_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
 if _app_dir and _app_dir not in sys.path:
     sys.path.insert(0, _app_dir)
-
-# PyInstaller-ready base path for assets (optional)
-def _base_path():
-    return getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-
-
-# Optional cover-art server (not started by default). Large image in RPC uses asset key from config.
-_cover_art_bytes = None
-_cover_art_lock = threading.Lock()
-COVER_SERVER_PORT = 0  # set when server starts
-
-
-class _CoverArtHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path.rstrip("/") in ("", "/", "/cover", "/cover.jpg"):
-            with _cover_art_lock:
-                data = _cover_art_bytes
-            if data:
-                self.send_response(200)
-                self.send_header("Content-Type", "image/jpeg")
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
-                self.wfile.write(data)
-            else:
-                self.send_response(204)
-                self.end_headers()
-        else:
-            self.send_response(404)
-            self.end_headers()
-
-    def log_message(self, *args):
-        pass
-
-
-def _start_cover_server():
-    global COVER_SERVER_PORT
-    server = HTTPServer(("127.0.0.1", 0), _CoverArtHandler)
-    COVER_SERVER_PORT = server.socket.getsockname()[1]
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    return f"http://127.0.0.1:{COVER_SERVER_PORT}/cover.jpg"
-
-
-def _set_cover_art(thumbnail_bytes):
-    with _cover_art_lock:
-        global _cover_art_bytes
-        _cover_art_bytes = thumbnail_bytes
 
 
 def _upload_cover_to_catbox(thumbnail_bytes):
@@ -131,23 +82,40 @@ def register_uri_scheme(exe_path=None):
 
 def run_listener_mode(uri):
     """
-    Listener mode: parse eternalrp:// URI and print sync message.
-    URI format: eternalrp://sync?track=<TrackName> (track may be URL-encoded).
+    Listener mode: parse eternalrp:// URI, display sync info, and attempt to
+    open the track in the default browser (Apple Music search) for listen-along.
+    URI format: eternalrp://sync?track=<Track>&artist=<Artist>
     """
     track_name = "Unknown Track"
+    artist_name = ""
     if uri.startswith("eternalrp://"):
-        # Strip protocol and parse path?query
         rest = uri[len("eternalrp://"):]
         if "?" in rest:
-            path, qs = rest.split("?", 1)
+            _, qs = rest.split("?", 1)
             params = urllib.parse.parse_qs(qs)
             if "track" in params and params["track"]:
-                track_name = params["track"][0]
-                track_name = urllib.parse.unquote(track_name)
+                track_name = urllib.parse.unquote(params["track"][0])
+            if "artist" in params and params["artist"]:
+                artist_name = urllib.parse.unquote(params["artist"][0])
         else:
-            # Allow simple eternalrp://Something
             track_name = urllib.parse.unquote(rest.replace("/", "").strip() or "Unknown Track")
-    print(f"[SYNC SUCCESS] Now listening along to: {track_name}")
+
+    if artist_name:
+        display = f"{track_name} by {artist_name}"
+    else:
+        display = track_name
+
+    print(f"[LISTEN ALONG] Now syncing to: {display}")
+
+    search_query = f"{track_name} {artist_name}".strip()
+    if search_query and search_query != "Unknown Track":
+        search_url = "https://music.apple.com/search?term=" + urllib.parse.quote(search_query, safe="")
+        try:
+            import webbrowser
+            webbrowser.open(search_url)
+            print(f"Opened Apple Music search: {search_url}")
+        except Exception:
+            print(f"Search manually: {search_url}")
     return 0
 
 
@@ -320,7 +288,6 @@ def run_host_mode():
                 cover_url = None
                 if use_smtc:
                     name, artist, pos, thumbnail_bytes, _ = _get_now_playing_smtc()
-                    _set_cover_art(thumbnail_bytes)
                     if thumbnail_bytes:
                         thumb_hash = hashlib.sha1(thumbnail_bytes).hexdigest()
                         if thumb_hash != last_cover_thumb_hash:
@@ -334,20 +301,21 @@ def run_host_mode():
                     if name is None and artist is None:
                         state = "No track"
                         details = "Apple Music"
-                        join_secret = "eternalrp://sync?track="
+                        join_secret = "eternalrp://sync?track=&artist="
                         pos_sec = None
                     else:
                         state = f"by {artist}"
                         details = name or "Unknown"
                         safe_track = urllib.parse.quote(details, safe="")
-                        join_secret = f"eternalrp://sync?track={safe_track}"
+                        safe_artist = urllib.parse.quote(artist or "", safe="")
+                        join_secret = f"eternalrp://sync?track={safe_track}&artist={safe_artist}"
                         pos_sec = pos
                 else:
                     track = itunes.CurrentTrack
                     if track is None:
                         state = "No track"
                         details = "Apple Music"
-                        join_secret = "eternalrp://sync?track="
+                        join_secret = "eternalrp://sync?track=&artist="
                         pos_sec = None
                     else:
                         name = getattr(track, "Name", None) or "Unknown"
@@ -356,16 +324,21 @@ def run_host_mode():
                         state = f"by {artist}"
                         details = name
                         safe_track = urllib.parse.quote(name, safe="")
-                        join_secret = f"eternalrp://sync?track={safe_track}"
+                        safe_artist = urllib.parse.quote(artist, safe="")
+                        join_secret = f"eternalrp://sync?track={safe_track}&artist={safe_artist}"
 
                 update_kw = dict(
                     state=state,
                     details=details,
                     party_id=party_id,
+                    party_size=[1, 2],
                     join=join_secret,
                     start=int(time.time() - int(pos_sec)) if pos_sec is not None else None,
                 )
-                update_kw["large_image"] = large_image_value
+                if have_cover and cover_url:
+                    update_kw["large_image"] = cover_url
+                else:
+                    update_kw["large_image"] = large_image_value
                 if details and details != "Apple Music":
                     update_kw["large_text"] = details
 
