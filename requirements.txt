@@ -1,5 +1,9 @@
 pywin32>=306
 pypresence>=4.2.0
+spotipy>=2.23.0
+pystray>=0.19.5
+Pillow>=10.0.0
+pyinstaller>=6.0.0
 winrt-Windows.Foundation>=3.0
 winrt-Windows.Media.Control>=3.0
 winrt-Windows.Storage.Streams>=3.0
