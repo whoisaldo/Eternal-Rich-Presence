@@ -121,21 +121,69 @@ class SpotifyProvider(BaseProvider):
                     pass
         return self._cached_cover
 
-    def search_and_play(self, track: str, artist: str = "") -> bool:
-        """Search for a track on Spotify and start playback on the active device."""
+    def search_and_play(self, track: str, artist: str = "",
+                        position_ms: int = 0) -> bool:
+        """Search for a track on Spotify and start playback on the active device.
+
+        Args:
+            track: Track title to search for.
+            artist: Artist name for a more precise search.
+            position_ms: Playback offset so the listener starts at the same
+                         second as the host.
+        """
         if self._sp is None:
+            log.debug("search_and_play: Spotify client not initialised")
             return False
         try:
             query = f"track:{track}"
             if artist:
                 query += f" artist:{artist}"
-            results = self._sp.search(q=query, type="track", limit=1)
-            tracks = results.get("tracks", {}).get("items", [])
-            if not tracks:
+            results = self._sp.search(q=query, type="track", limit=5)
+            items = results.get("tracks", {}).get("items", [])
+            if not items:
+                log.debug("search_and_play: no results for %r", query)
                 return False
-            self._sp.start_playback(uris=[tracks[0]["uri"]])
-            log.info("Spotify playback started: %s", tracks[0].get("name", track))
+
+            matched = self._fuzzy_pick(items, track, artist)
+            if matched is None:
+                log.debug("search_and_play: no fuzzy match among %d results", len(items))
+                return False
+
+            playback_kw = {"uris": [matched["uri"]]}
+            if position_ms > 0:
+                playback_kw["position_ms"] = position_ms
+
+            try:
+                self._sp.start_playback(**playback_kw)
+            except Exception as e:
+                err = str(e).lower()
+                if "no active device" in err or "player command failed" in err:
+                    log.debug("search_and_play: no active Spotify device — %s", e)
+                    return False
+                raise
+
+            log.info("Spotify playback started: %s (offset %d ms)",
+                     matched.get("name", track), position_ms)
             return True
         except Exception as e:
-            log.debug("Spotify search_and_play failed: %s", e)
+            log.debug("search_and_play failed: %s", e)
             return False
+
+    @staticmethod
+    def _fuzzy_pick(items: list, track: str, artist: str) -> Optional[dict]:
+        """Return the first search result whose title or artist partially
+        matches the input, or ``None`` if nothing is close enough."""
+        track_low = track.lower()
+        artist_low = artist.lower() if artist else ""
+        for item in items:
+            name_low = item.get("name", "").lower()
+            item_artists = " ".join(
+                a.get("name", "") for a in item.get("artists", [])
+            ).lower()
+            title_ok = track_low in name_low or name_low in track_low
+            artist_ok = (not artist_low
+                         or artist_low in item_artists
+                         or item_artists in artist_low)
+            if title_ok and artist_ok:
+                return item
+        return None

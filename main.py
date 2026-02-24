@@ -109,6 +109,7 @@ def run_listener_mode(uri: str) -> int:
     """
     track_name = "Unknown Track"
     artist_name = ""
+    position_sec = 0
 
     if uri.startswith("eternalrp://"):
         rest = uri[len("eternalrp://"):]
@@ -119,24 +120,32 @@ def run_listener_mode(uri: str) -> int:
                 track_name = urllib.parse.unquote(params["track"][0])
             if "artist" in params and params["artist"]:
                 artist_name = urllib.parse.unquote(params["artist"][0])
+            if "pos" in params and params["pos"]:
+                try:
+                    position_sec = int(params["pos"][0])
+                except (ValueError, TypeError):
+                    position_sec = 0
         else:
             track_name = urllib.parse.unquote(
                 rest.replace("/", "").strip() or "Unknown Track"
             )
 
     display = f"{track_name} by {artist_name}" if artist_name else track_name
-    log.info("[LISTEN ALONG] Syncing to: %s", display)
+    log.info("[SYNC] Attempting to join %s at %ds", display, position_sec)
+
+    position_ms = position_sec * 1000
 
     try:
         from config import SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET
         if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
             from providers.spotify import SpotifyProvider
             sp = SpotifyProvider(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET)
-            if sp.search_and_play(track_name, artist_name):
-                log.info("Playback started on Spotify: %s", display)
+            if sp.search_and_play(track_name, artist_name, position_ms=position_ms):
+                log.info("Playback started on Spotify: %s at %ds", display, position_sec)
                 return 0
-    except (ImportError, Exception):
-        log.debug("Spotify sync unavailable", exc_info=True)
+            log.debug("Spotify search_and_play returned False, falling back to Apple Music")
+    except Exception:
+        log.debug("Spotify sync unavailable, falling back to Apple Music", exc_info=True)
 
     search_query = f"{track_name} {artist_name}".strip()
     if search_query and search_query != "Unknown Track":
@@ -147,7 +156,7 @@ def run_listener_mode(uri: str) -> int:
         try:
             import webbrowser
             webbrowser.open(search_url)
-            log.info("Opened Apple Music search: %s", search_url)
+            log.info("Opened Apple Music search fallback: %s", search_url)
         except Exception:
             log.info("Search manually: %s", search_url)
 
@@ -308,6 +317,7 @@ def run_host_mode() -> int:
         def on_reconnect(_icon, _item):
             log.info("Manual reconnect requested")
             try:
+                dp.clear()
                 dp.disconnect()
                 dp.connect()
                 paused.clear()
@@ -349,12 +359,27 @@ def run_host_mode() -> int:
             stop_event.set()
             icon.stop()
 
+        def on_log_join_secret(_icon, _item):
+            t = dp.current_track
+            if t is None:
+                log.info("[DEBUG] No track playing — no join_secret to show")
+                return
+            import urllib.parse as _up
+            pos = int(t.position_sec) if t.position_sec is not None else 0
+            safe_t = _up.quote(t.title[:50], safe="")
+            safe_a = _up.quote(t.artist[:30], safe="")
+            secret = f"eternalrp://sync?track={safe_t}&artist={safe_a}&pos={pos}"
+            if len(secret) > 128:
+                secret = secret[:128]
+            log.info("[DEBUG] Current join_secret: %s", secret)
+
         debug_menu = pystray.Menu(
             pystray.MenuItem(_discord_status_label, lambda: None, enabled=False),
             pystray.MenuItem(
                 lambda _item: f"Log: {os.path.basename(LOG_PATH)}", lambda: None, enabled=False
             ),
             pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Log Join Secret", on_log_join_secret),
             pystray.MenuItem("Open Log File", on_open_log),
             pystray.MenuItem("Copy Log Path", on_copy_log_path),
         )
@@ -370,16 +395,7 @@ def run_host_mode() -> int:
                 on_toggle,
             ),
             pystray.MenuItem("Reconnect to Discord", on_reconnect),
-            pystray.MenuItem("Debug", pystray.Menu(
-                pystray.MenuItem(_discord_status_label, lambda: None, enabled=False),
-                pystray.MenuItem(
-                    lambda _item: f"Log: {os.path.basename(LOG_PATH)}",
-                    lambda: None, enabled=False,
-                ),
-                pystray.Menu.SEPARATOR,
-                pystray.MenuItem("Open Log File", on_open_log),
-                pystray.MenuItem("Copy Log Path", on_copy_log_path),
-            )),
+            pystray.MenuItem("Debug", debug_menu),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Exit", on_exit),
         )

@@ -53,7 +53,8 @@ class DiscordPresence:
         details = title
         safe_track = urllib.parse.quote(details[:50], safe="")
         safe_artist = urllib.parse.quote(artist[:30], safe="")
-        join_secret = f"eternalrp://sync?track={safe_track}&artist={safe_artist}"
+        pos = int(track.position_sec) if track.position_sec is not None else 0
+        join_secret = f"eternalrp://sync?track={safe_track}&artist={safe_artist}&pos={pos}"
         if len(join_secret) > 128:
             join_secret = join_secret[:128]
 
