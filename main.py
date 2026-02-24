@@ -66,7 +66,9 @@ def _msgbox(text: str, title: str = "EternalRichPresence", info: bool = False):
     else:
         log.error("MSGBOX: %s", text)
     try:
-        flags = 0x40 if info else 0x10
+        MB_SETFOREGROUND = 0x00010000
+        MB_TASKMODAL = 0x00002000
+        flags = (0x40 if info else 0x10) | MB_SETFOREGROUND | MB_TASKMODAL
         ctypes.windll.user32.MessageBoxW(0, text, title, flags)
     except Exception:
         pass
@@ -452,7 +454,26 @@ def _clear_presence() -> int:
     return 0
 
 
+_BANNER = r"""
+  _____ _                        _
+ | ____| |_ ___ _ __ _ __   __ _| |
+ |  _| | __/ _ \ '__| '_ \ / _` | |
+ | |___| ||  __/ |  | | | | (_| | |
+ |_____|_| \___|_|  |_| |_|\__,_|_|
+  ____  _      _       ____
+ |  _ \(_) ___| |__   |  _ \ _ __ ___  ___  ___ _ __   ___ ___
+ | |_) | |/ __| '_ \  | |_) | '__/ _ \/ __|/ _ \ '_ \ / __/ _ \
+ |  _ <| | (__| | | | |  __/| | |  __/\__ \  __/ | | | (_|  __/
+ |_| \_\_|\___|_| |_| |_|   |_|  \___||___/\___|_| |_|\___\___|
+
+       by Ali Younes (@whoisaldo)
+       https://github.com/whoisaldo/Eternal-Rich-Presence
+"""
+
+
 def main():
+    if not getattr(sys, "frozen", False):
+        print(_BANNER)
     log.info("EternalRichPresence starting (frozen=%s, dir=%s)", getattr(sys, "frozen", False), _app_dir)
     args = sys.argv[1:]
 
