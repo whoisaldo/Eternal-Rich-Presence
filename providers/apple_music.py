@@ -3,7 +3,10 @@ import sys
 import threading
 from typing import Optional
 
+from logger import get_logger
 from .base import BaseProvider, TrackInfo
+
+log = get_logger("erp.apple_music")
 
 # winrt on Python 3.13 fires "Event loop is closed" from a native callback
 # after asyncio.run() has already returned the data.  Suppress via every
@@ -48,9 +51,11 @@ class AppleMusicProvider(BaseProvider):
             import win32com.client
             self._itunes = win32com.client.Dispatch("iTunes.Application")
             _ = self._itunes.CurrentTrack
+            log.debug("Using iTunes COM")
         except Exception:
             self._itunes = None
             self._use_smtc = True
+            log.debug("iTunes COM unavailable, using SMTC")
 
     def is_available(self) -> bool:
         if self._itunes is not None:
@@ -143,8 +148,8 @@ class AppleMusicProvider(BaseProvider):
         def _run_in_thread():
             try:
                 result[0] = asyncio.run(_fetch())
-            except Exception:
-                pass
+            except Exception as e:
+                log.debug("SMTC fetch error: %s", e)
 
         t = threading.Thread(target=_run_in_thread, daemon=True)
         t.start()

@@ -4,8 +4,11 @@ import time
 import urllib.parse
 from typing import Optional
 
+from logger import get_logger
 from providers.base import TrackInfo
 from utils import upload_cover_to_catbox
+
+log = get_logger("erp.presence")
 
 
 class DiscordPresence:
@@ -24,6 +27,7 @@ class DiscordPresence:
         from pypresence import Presence
         self._rpc = Presence(self._client_id)
         self._rpc.connect()
+        log.debug("RPC handshake complete")
 
     def disconnect(self):
         if self._rpc is None:
@@ -35,6 +39,7 @@ class DiscordPresence:
         except Exception:
             pass
         self._rpc = None
+        log.debug("RPC disconnected")
 
     def update(self, track: TrackInfo, provider_name: str = ""):
         if self._rpc is None:
@@ -69,7 +74,7 @@ class DiscordPresence:
         track_key = f"{details}|{state}"
         if track_key != self._last_track_key:
             self._last_track_key = track_key
-            print(f"Now playing: {details} \u2014 {artist}")
+            log.info("Now playing: %s \u2014 %s", details, artist)
 
         try:
             self._rpc.clear()
@@ -95,4 +100,8 @@ class DiscordPresence:
         if thumb_hash != self._last_cover_hash:
             self._last_cover_hash = thumb_hash
             self._cached_cover_url = upload_cover_to_catbox(cover_art)
+            if self._cached_cover_url:
+                log.debug("Cover art uploaded: %s", self._cached_cover_url)
+            else:
+                log.debug("Cover art upload failed (hash %s)", thumb_hash[:8])
         return self._cached_cover_url

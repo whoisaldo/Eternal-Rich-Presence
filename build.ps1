@@ -20,6 +20,7 @@ python -m PyInstaller `
     --hidden-import manager `
     --hidden-import presence `
     --hidden-import utils `
+    --hidden-import logger `
     --hidden-import pystray `
     --hidden-import PIL `
     --hidden-import PIL.Image `

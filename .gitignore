@@ -10,4 +10,6 @@ dist/
 build/
 *.spec
 .spotify_token_cache
+eternalrp.log
+eternalrp.log.*
 EternalRichPresence.exe

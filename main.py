@@ -29,6 +29,10 @@ _app_dir = (
 if _app_dir and _app_dir not in sys.path:
     sys.path.insert(0, _app_dir)
 
+from logger import get_logger, LOG_PATH
+
+log = get_logger("erp.main")
+
 _ICON_NAME = "Apple_Music_Icon.png"
 
 
@@ -50,16 +54,18 @@ def _create_default_config():
                 'SPOTIFY_CLIENT_SECRET = ""\n'
                 'SPOTIFY_REDIRECT_URI = "http://localhost:8888/callback"\n'
             )
-    except Exception:
-        pass
+        log.info("Created default config.py at %s", cfg_path)
+    except Exception as e:
+        log.error("Failed to create config.py: %s", e)
 
 
 def _msgbox(text: str, title: str = "EternalRichPresence"):
     """Show a native Windows message box (works even with --noconsole)."""
+    log.error("MSGBOX: %s", text)
     try:
         ctypes.windll.user32.MessageBoxW(0, text, title, 0x10)
     except Exception:
-        print(text, file=sys.stderr)
+        pass
 
 
 def _icon_path():
@@ -86,7 +92,7 @@ def _load_tray_icon():
         try:
             return Image.open(path)
         except Exception:
-            pass
+            log.warning("Could not load tray icon from %s", path)
     return Image.new("RGB", (64, 64), (252, 60, 68))
 
 
@@ -113,7 +119,7 @@ def run_listener_mode(uri: str) -> int:
             )
 
     display = f"{track_name} by {artist_name}" if artist_name else track_name
-    print(f"[LISTEN ALONG] Syncing to: {display}")
+    log.info("[LISTEN ALONG] Syncing to: %s", display)
 
     try:
         from config import SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET
@@ -121,10 +127,10 @@ def run_listener_mode(uri: str) -> int:
             from providers.spotify import SpotifyProvider
             sp = SpotifyProvider(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET)
             if sp.search_and_play(track_name, artist_name):
-                print(f"Playback started on Spotify: {display}")
+                log.info("Playback started on Spotify: %s", display)
                 return 0
     except (ImportError, Exception):
-        pass
+        log.debug("Spotify sync unavailable", exc_info=True)
 
     search_query = f"{track_name} {artist_name}".strip()
     if search_query and search_query != "Unknown Track":
@@ -135,9 +141,9 @@ def run_listener_mode(uri: str) -> int:
         try:
             import webbrowser
             webbrowser.open(search_url)
-            print(f"Opened Apple Music search: {search_url}")
+            log.info("Opened Apple Music search: %s", search_url)
         except Exception:
-            print(f"Search manually: {search_url}")
+            log.info("Search manually: %s", search_url)
 
     return 0
 
@@ -147,9 +153,12 @@ def run_host_mode() -> int:
     Poll music providers, update Discord Rich Presence, and sit in the system
     tray until the user exits.  Priority: Apple Music > Spotify.
     """
+    log.info("Starting host mode")
+
     try:
         from providers.apple_music import AppleMusicProvider
     except Exception as e:
+        log.exception("Failed to load Apple Music provider")
         _msgbox(f"Failed to load Apple Music provider:\n{e}")
         return 1
 
@@ -169,8 +178,9 @@ def run_host_mode() -> int:
             provider_list.append(
                 SpotifyProvider(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, redirect)
             )
+            log.info("Spotify provider loaded")
     except (ImportError, Exception):
-        pass
+        log.debug("Spotify provider not loaded", exc_info=True)
 
     mgr = ProviderManager(provider_list)
 
@@ -218,8 +228,9 @@ def run_host_mode() -> int:
                     if dp._rpc is None:
                         try:
                             dp.connect()
-                        except Exception:
-                            pass
+                            log.info("Connected to Discord RPC")
+                        except Exception as e:
+                            log.debug("Discord RPC connect retry failed: %s", e)
 
                     if dp._rpc is not None:
                         t = mgr.get_now_playing()
@@ -235,7 +246,7 @@ def run_host_mode() -> int:
                             tray.title = tip
                 except Exception as e:
                     dp._rpc = None
-                    print(f"Update error: {e}", file=sys.stderr)
+                    log.warning("Poll error (will retry): %s", e)
             stop_event.wait(interval)
 
     poll_thread = threading.Thread(target=_poll_loop, daemon=True)
@@ -276,24 +287,59 @@ def run_host_mode() -> int:
             p = mgr.active_provider
             return f"Source: {p.name}" if p else "Source: —"
 
+        def _discord_status_label(_item):
+            return "Discord: Connected" if dp._rpc is not None else "Discord: Disconnected"
+
         def on_toggle(_icon, _item):
             if paused.is_set():
                 paused.clear()
+                log.info("Resumed")
             else:
                 paused.set()
                 dp.clear()
+                log.info("Paused")
 
         def on_reconnect(_icon, _item):
+            log.info("Manual reconnect requested")
             try:
                 dp.disconnect()
                 dp.connect()
                 paused.clear()
+                log.info("Reconnected to Discord RPC")
             except Exception as e:
+                log.error("Reconnect failed: %s", e)
                 _msgbox(f"Reconnect failed:\n{e}")
 
+        def on_open_log(_icon, _item):
+            log.info("Opening log file: %s", LOG_PATH)
+            try:
+                os.startfile(LOG_PATH)
+            except Exception:
+                _msgbox(f"Log file:\n{LOG_PATH}")
+
+        def on_copy_log_path(_icon, _item):
+            try:
+                import subprocess
+                subprocess.run(
+                    ["clip"], input=LOG_PATH.encode(), check=True, creationflags=0x08000000
+                )
+            except Exception:
+                _msgbox(f"Log path:\n{LOG_PATH}")
+
         def on_exit(icon, _item):
+            log.info("Exit requested")
             stop_event.set()
             icon.stop()
+
+        debug_menu = pystray.Menu(
+            pystray.MenuItem(_discord_status_label, lambda: None, enabled=False),
+            pystray.MenuItem(
+                lambda _item: f"Log: {os.path.basename(LOG_PATH)}", lambda: None, enabled=False
+            ),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Open Log File", on_open_log),
+            pystray.MenuItem("Copy Log Path", on_copy_log_path),
+        )
 
         menu = pystray.Menu(
             pystray.MenuItem(_now_playing_label, lambda: None, enabled=False),
@@ -304,6 +350,16 @@ def run_host_mode() -> int:
                 on_toggle,
             ),
             pystray.MenuItem("Reconnect to Discord", on_reconnect),
+            pystray.MenuItem("Debug", pystray.Menu(
+                pystray.MenuItem(_discord_status_label, lambda: None, enabled=False),
+                pystray.MenuItem(
+                    lambda _item: f"Log: {os.path.basename(LOG_PATH)}",
+                    lambda: None, enabled=False,
+                ),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Open Log File", on_open_log),
+                pystray.MenuItem("Copy Log Path", on_copy_log_path),
+            )),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Exit", on_exit),
         )
@@ -311,8 +367,10 @@ def run_host_mode() -> int:
         tray = pystray.Icon(
             "EternalRichPresence", icon_image, "EternalRichPresence", menu
         )
+        log.info("System tray started")
         tray.run()
     except Exception as e:
+        log.exception("System tray failed")
         _msgbox(
             f"System tray failed to start:\n{e}\n\n"
             "Falling back to console mode (Ctrl+C to quit)."
@@ -324,6 +382,7 @@ def run_host_mode() -> int:
             pass
 
     # --- teardown ---
+    log.info("Shutting down")
     stop_event.set()
     poll_thread.join(timeout=10)
     atexit.unregister(_cleanup)
@@ -362,11 +421,9 @@ def _clear_presence() -> int:
             rpc.clear(pid=os.getpid())
         except Exception:
             pass
-        print(
-            "Rich Presence cleared. If it persists, quit Discord from the "
-            "system tray and reopen."
-        )
+        log.info("Rich Presence cleared")
     except Exception as e:
+        log.error("Could not clear: %s", e)
         _msgbox(f"Could not clear (is Discord running?):\n{e}")
         return 1
     finally:
@@ -378,6 +435,7 @@ def _clear_presence() -> int:
 
 
 def main():
+    log.info("EternalRichPresence starting (frozen=%s, dir=%s)", getattr(sys, "frozen", False), _app_dir)
     args = sys.argv[1:]
 
     try:
@@ -389,10 +447,9 @@ def main():
     if "--register-uri" in args:
         from utils import register_uri_scheme as _reg
         ok = _reg()
-        if ok:
-            print("URI scheme registered.")
-        else:
-            print("URI scheme registration failed (try running as Administrator).")
+        msg = "URI scheme registered." if ok else "URI scheme registration failed (try Administrator)."
+        log.info(msg)
+        print(msg)
         return 0 if ok else 1
 
     if "--clear" in args:
@@ -409,5 +466,6 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception as _fatal:
+        log.critical("Fatal crash", exc_info=True)
         _msgbox(f"EternalRichPresence crashed:\n\n{_fatal}")
         sys.exit(1)

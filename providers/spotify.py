@@ -3,7 +3,10 @@ import sys
 import urllib.request
 from typing import Optional
 
+from logger import get_logger
 from .base import BaseProvider, TrackInfo
+
+log = get_logger("erp.spotify")
 
 
 def _app_dir() -> str:
@@ -52,8 +55,10 @@ class SpotifyProvider(BaseProvider):
                 open_browser=True,
             )
             self._sp = spotipy.Spotify(auth_manager=auth)
-        except Exception:
+            log.debug("Spotify client initialized")
+        except Exception as e:
             self._sp = None
+            log.debug("Spotify init failed: %s", e)
 
     def is_available(self) -> bool:
         if self._sp is None:
@@ -129,6 +134,8 @@ class SpotifyProvider(BaseProvider):
             if not tracks:
                 return False
             self._sp.start_playback(uris=[tracks[0]["uri"]])
+            log.info("Spotify playback started: %s", tracks[0].get("name", track))
             return True
-        except Exception:
+        except Exception as e:
+            log.debug("Spotify search_and_play failed: %s", e)
             return False
