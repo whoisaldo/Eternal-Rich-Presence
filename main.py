@@ -59,11 +59,15 @@ def _create_default_config():
         log.error("Failed to create config.py: %s", e)
 
 
-def _msgbox(text: str, title: str = "EternalRichPresence"):
+def _msgbox(text: str, title: str = "EternalRichPresence", info: bool = False):
     """Show a native Windows message box (works even with --noconsole)."""
-    log.error("MSGBOX: %s", text)
+    if info:
+        log.info("MSGBOX: %s", text)
+    else:
+        log.error("MSGBOX: %s", text)
     try:
-        ctypes.windll.user32.MessageBoxW(0, text, title, 0x10)
+        flags = 0x40 if info else 0x10
+        ctypes.windll.user32.MessageBoxW(0, text, title, flags)
     except Exception:
         pass
 
@@ -326,6 +330,18 @@ def run_host_mode() -> int:
             except Exception:
                 _msgbox(f"Log path:\n{LOG_PATH}")
 
+        def on_about(_icon, _item):
+            _msgbox(
+                "EternalRichPresence\n\n"
+                "Created by Ali Younes (@whoisaldo)\n\n"
+                "A bridge for Apple Music and Spotify\n"
+                "Discord Rich Presence.\n\n"
+                "https://github.com/whoisaldo/Eternal-Rich-Presence\n"
+                "Aliyounes@eternalreverse.com",
+                "About EternalRichPresence",
+                info=True,
+            )
+
         def on_exit(icon, _item):
             log.info("Exit requested")
             stop_event.set()
@@ -342,6 +358,8 @@ def run_host_mode() -> int:
         )
 
         menu = pystray.Menu(
+            pystray.MenuItem("About EternalRichPresence", on_about),
+            pystray.Menu.SEPARATOR,
             pystray.MenuItem(_now_playing_label, lambda: None, enabled=False),
             pystray.MenuItem(_provider_label, lambda: None, enabled=False),
             pystray.Menu.SEPARATOR,

@@ -12,6 +12,7 @@ python -m PyInstaller `
     --noconsole `
     --icon=Apple_Music_Icon.png `
     --name="EternalRichPresence" `
+    --version-file=version_info.txt `
     --add-data "Apple_Music_Icon.png;." `
     --hidden-import providers `
     --hidden-import providers.base `
