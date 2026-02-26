@@ -143,6 +143,13 @@ def run_listener_mode(uri: str) -> int:
             if sp.search_and_play(track_name, artist_name, position_ms=position_ms):
                 log.info("Playback started on Spotify: %s at %ds", display, position_sec)
                 return 0
+            if sp.last_error == "no_active_device":
+                _msgbox(
+                    "Spotify is open but idle.\n\n"
+                    "Please press Play once on your Spotify app so we\n"
+                    "can sync your music!",
+                    info=True,
+                )
             log.debug("Spotify search_and_play returned False, falling back to Apple Music")
     except Exception:
         log.debug("Spotify sync unavailable, falling back to Apple Music", exc_info=True)
@@ -170,6 +177,41 @@ def run_host_mode() -> int:
     """
     log.info("Starting host mode")
 
+    # --- validate / create config first ---
+    needs_setup = False
+    try:
+        from config import CLIENT_ID
+        if not CLIENT_ID or CLIENT_ID == "YOUR_DISCORD_CLIENT_ID":
+            needs_setup = True
+    except ImportError:
+        needs_setup = True
+
+    if needs_setup:
+        log.info("Config missing or incomplete — launching setup GUI")
+        try:
+            from setup_gui import run_setup_gui
+            if not run_setup_gui():
+                log.info("Setup cancelled by user")
+                return 1
+            import importlib
+            if "config" in sys.modules:
+                importlib.reload(sys.modules["config"])
+            from config import CLIENT_ID
+            if not CLIENT_ID or CLIENT_ID == "YOUR_DISCORD_CLIENT_ID":
+                _msgbox("Discord Client ID is still not set. Please try again.")
+                return 1
+        except Exception as e:
+            log.error("Setup GUI failed: %s", e)
+            _create_default_config()
+            _msgbox(
+                "Could not open the setup window.\n\n"
+                "A config.py has been created next to the app.\n"
+                "Open it in Notepad, paste your Discord CLIENT_ID, "
+                "save, and launch again."
+            )
+            return 1
+
+    # --- load providers ---
     try:
         from providers.apple_music import AppleMusicProvider
     except Exception as e:
@@ -198,24 +240,6 @@ def run_host_mode() -> int:
         log.debug("Spotify provider not loaded", exc_info=True)
 
     mgr = ProviderManager(provider_list)
-
-    try:
-        from config import CLIENT_ID
-    except ImportError:
-        _create_default_config()
-        _msgbox(
-            "First run: config.py has been created next to the app.\n\n"
-            "Open config.py in Notepad, paste your Discord CLIENT_ID, "
-            "save, and launch again."
-        )
-        return 1
-    if not CLIENT_ID or CLIENT_ID == "YOUR_DISCORD_CLIENT_ID":
-        _msgbox(
-            "CLIENT_ID is not set.\n\n"
-            "Open config.py (next to the app) and paste your Discord "
-            "application Client ID."
-        )
-        return 1
 
     try:
         from config import ASSET_KEY
@@ -255,10 +279,12 @@ def run_host_mode() -> int:
                             name = mgr.active_provider.name if mgr.active_provider else ""
                             dp.update(t, name)
                         if tray:
-                            tip = "EternalRichPresence"
                             if t:
-                                tip = f"{t.title} — {t.artist}"[:63]
-                            tray.title = tip
+                                src = mgr.active_provider.name if mgr.active_provider else "?"
+                                tip = f"EternalRichPresence | {src}\n{t.title} — {t.artist}"
+                            else:
+                                tip = "EternalRichPresence | Idle"
+                            tray.title = tip[:127]
                 except Exception as e:
                     dp._rpc = None
                     log.warning("Poll error (will retry): %s", e)
@@ -344,12 +370,16 @@ def run_host_mode() -> int:
 
         def on_about(_icon, _item):
             _msgbox(
-                "EternalRichPresence\n\n"
+                "EternalRichPresence  v1.0\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                 "Created by Ali Younes (@whoisaldo)\n\n"
-                "A bridge for Apple Music and Spotify\n"
-                "Discord Rich Presence.\n\n"
-                "https://github.com/whoisaldo/Eternal-Rich-Presence\n"
-                "Aliyounes@eternalreverse.com",
+                "Discord Rich Presence bridge for\n"
+                "Apple Music and Spotify — with live\n"
+                "cover art and Listen Along.\n\n"
+                "Official repo:\n"
+                "github.com/whoisaldo/Eternal-Rich-Presence\n\n"
+                "Contact: Aliyounes@eternalreverse.com\n\n"
+                "© 2026 Ali Younes. All rights reserved.",
                 "About EternalRichPresence",
                 info=True,
             )
@@ -495,7 +525,11 @@ def main():
 
     try:
         from utils import register_uri_scheme
-        register_uri_scheme(silent=True)
+        if not register_uri_scheme(silent=True):
+            log.warning(
+                "Listen Along feature needs a one-time Admin run to set up "
+                "deep links. Right-click the app and choose 'Run as Administrator'."
+            )
     except Exception:
         pass
 
@@ -517,7 +551,33 @@ def main():
     return run_host_mode()
 
 
+def _is_admin() -> bool:
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin() != 0
+    except Exception:
+        return False
+
+
+def _elevate():
+    """Re-launch the current process with UAC admin prompt."""
+    if getattr(sys, "frozen", False):
+        exe = sys.executable
+        params = " ".join(sys.argv[1:])
+    else:
+        exe = sys.executable
+        params = f'"{os.path.abspath(__file__)}" ' + " ".join(sys.argv[1:])
+    try:
+        ctypes.windll.shell32.ShellExecuteW(
+            None, "runas", exe, params.strip(), None, 1
+        )
+    except Exception as e:
+        log.error("UAC elevation failed: %s", e)
+
+
 if __name__ == "__main__":
+    if not _is_admin():
+        _elevate()
+        sys.exit(0)
     try:
         sys.exit(main())
     except Exception as _fatal:

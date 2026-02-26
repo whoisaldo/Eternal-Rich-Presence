@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import urllib.request
 from typing import Optional
@@ -22,6 +23,7 @@ class SpotifyProvider(BaseProvider):
     """
 
     SCOPES = "user-read-currently-playing user-read-playback-state user-modify-playback-state"
+    LATENCY_OFFSET_MS = 1500
 
     def __init__(self, client_id: str, client_secret: str,
                  redirect_uri: str = "http://localhost:8888/callback"):
@@ -31,6 +33,7 @@ class SpotifyProvider(BaseProvider):
         self._sp = None
         self._last_album_id: Optional[str] = None
         self._cached_cover: Optional[bytes] = None
+        self.last_error: Optional[str] = None
         self._init_client()
 
     @property
@@ -150,8 +153,9 @@ class SpotifyProvider(BaseProvider):
                 return False
 
             playback_kw = {"uris": [matched["uri"]]}
-            if position_ms > 0:
-                playback_kw["position_ms"] = position_ms
+            adjusted_ms = max(0, position_ms + self.LATENCY_OFFSET_MS)
+            if adjusted_ms > 0:
+                playback_kw["position_ms"] = adjusted_ms
 
             try:
                 self._sp.start_playback(**playback_kw)
@@ -159,28 +163,50 @@ class SpotifyProvider(BaseProvider):
                 err = str(e).lower()
                 if "no active device" in err or "player command failed" in err:
                     log.debug("search_and_play: no active Spotify device — %s", e)
+                    self.last_error = "no_active_device"
                     return False
                 raise
 
+            self.last_error = None
             log.info("Spotify playback started: %s (offset %d ms)",
-                     matched.get("name", track), position_ms)
+                     matched.get("name", track), adjusted_ms)
             return True
         except Exception as e:
             log.debug("search_and_play failed: %s", e)
+            self.last_error = str(e)
             return False
 
-    @staticmethod
-    def _fuzzy_pick(items: list, track: str, artist: str) -> Optional[dict]:
+    _STRIP_SUFFIXES = re.compile(
+        r"\s*[\-–—]\s*(single|deluxe|remaster(ed)?|bonus track|"
+        r"expanded|anniversary|live|remix|version|edition)"
+        r".*$",
+        re.IGNORECASE,
+    )
+    _PAREN_NOISE = re.compile(
+        r"\s*\((?:remaster(ed)?|deluxe|single|bonus|expanded|anniversary|"
+        r"live|remix|feat\.?[^)]*|version|edition)[^)]*\)",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _normalize(cls, text: str) -> str:
+        """Strip common suffixes/parenthetical noise for fuzzy comparison."""
+        text = cls._PAREN_NOISE.sub("", text)
+        text = cls._STRIP_SUFFIXES.sub("", text)
+        return text.strip().lower()
+
+    @classmethod
+    def _fuzzy_pick(cls, items: list, track: str, artist: str) -> Optional[dict]:
         """Return the first search result whose title or artist partially
         matches the input, or ``None`` if nothing is close enough."""
-        track_low = track.lower()
-        artist_low = artist.lower() if artist else ""
+        track_norm = cls._normalize(track)
+        artist_low = artist.lower().strip() if artist else ""
         for item in items:
-            name_low = item.get("name", "").lower()
+            name_norm = cls._normalize(item.get("name", ""))
             item_artists = " ".join(
                 a.get("name", "") for a in item.get("artists", [])
             ).lower()
-            title_ok = track_low in name_low or name_low in track_low
+            title_ok = track_norm in name_norm or name_norm in track_norm
             artist_ok = (not artist_low
                          or artist_low in item_artists
                          or item_artists in artist_low)

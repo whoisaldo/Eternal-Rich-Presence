@@ -10,6 +10,7 @@ Write-Host "Building executable..." -ForegroundColor Cyan
 python -m PyInstaller `
     --onefile `
     --noconsole `
+    --uac-admin `
     --icon=Apple_Music_Icon.png `
     --name="EternalRichPresence" `
     --version-file=version_info.txt `
@@ -22,6 +23,7 @@ python -m PyInstaller `
     --hidden-import presence `
     --hidden-import utils `
     --hidden-import logger `
+    --hidden-import setup_gui `
     --hidden-import pystray `
     --hidden-import PIL `
     --hidden-import PIL.Image `

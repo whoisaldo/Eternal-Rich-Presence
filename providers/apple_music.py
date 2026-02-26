@@ -1,6 +1,7 @@
 import asyncio
 import sys
 import threading
+import time
 from typing import Optional
 
 from logger import get_logger
@@ -29,6 +30,29 @@ def _quiet_unraisable_hook(unraisable):
 
 threading.excepthook = _quiet_threading_hook
 sys.unraisablehook = _quiet_unraisable_hook
+
+
+_WIN_EPOCH_OFFSET = 116444736000000000  # 100ns ticks between 1601-01-01 and 1970-01-01
+
+
+def _smtc_elapsed_since_update(timeline) -> float:
+    """Return seconds elapsed since SMTC last updated the timeline snapshot.
+
+    SMTC freezes ``position`` at the moment of the last state change.
+    We compensate by adding wall-clock time that has passed since then.
+    """
+    try:
+        lut = getattr(timeline, "last_updated_time", None)
+        if lut is None:
+            return 0.0
+        filetime = getattr(lut, "universal_time", None)
+        if filetime is None or filetime == 0:
+            return 0.0
+        updated_unix = (filetime - _WIN_EPOCH_OFFSET) / 10_000_000
+        elapsed = time.time() - updated_unix
+        return max(0.0, elapsed)
+    except Exception:
+        return 0.0
 
 
 class AppleMusicProvider(BaseProvider):
@@ -124,7 +148,9 @@ class AppleMusicProvider(BaseProvider):
                             if timeline:
                                 pos = getattr(timeline, "position", None)
                                 if pos is not None and hasattr(pos, "total_seconds"):
-                                    pos_sec = int(pos.total_seconds())
+                                    raw_sec = pos.total_seconds()
+                                    elapsed = _smtc_elapsed_since_update(timeline)
+                                    pos_sec = int(raw_sec + elapsed)
                         except Exception:
                             pass
 
