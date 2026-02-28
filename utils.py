@@ -65,3 +65,36 @@ def register_uri_scheme(exe_path: str = None, silent: bool = False) -> bool:
         if not silent:
             print(f"URI registration failed (try running as Administrator): {e}", file=sys.stderr)
         return False
+
+
+def register_discord_launch(client_id: str, exe_path: str = None, silent: bool = False) -> bool:
+    """Register discord-{client_id}:// protocol so Discord can launch the app on Join.
+
+    This is the mechanism Discord uses when a user clicks "Join" on someone's
+    Rich Presence.  Discord opens ``discord-{client_id}://join/{secret}`` and
+    the OS launches the registered command with the URL as an argument.
+
+    Written to HKCU (no admin required).
+    """
+    try:
+        import winreg
+    except ImportError:
+        return False
+
+    cmd = os.path.abspath(exe_path or sys.executable)
+    command = f'"{cmd}" "%1"'
+    protocol = f"discord-{client_id}"
+
+    try:
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"SOFTWARE\Classes\{protocol}") as k:
+            winreg.SetValueEx(k, None, 0, winreg.REG_SZ, f"URL:Run EternalRichPresence")
+            winreg.SetValueEx(k, "URL Protocol", 0, winreg.REG_SZ, "")
+        with winreg.CreateKey(
+            winreg.HKEY_CURRENT_USER, rf"SOFTWARE\Classes\{protocol}\shell\open\command"
+        ) as k:
+            winreg.SetValueEx(k, None, 0, winreg.REG_SZ, command)
+        return True
+    except OSError as e:
+        if not silent:
+            print(f"Discord protocol registration failed: {e}", file=sys.stderr)
+        return False

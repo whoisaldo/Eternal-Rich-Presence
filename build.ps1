@@ -24,6 +24,7 @@ python -m PyInstaller `
     --hidden-import utils `
     --hidden-import logger `
     --hidden-import setup_gui `
+    --hidden-import discord_events `
     --hidden-import pystray `
     --hidden-import PIL `
     --hidden-import PIL.Image `

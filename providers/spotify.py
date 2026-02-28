@@ -138,18 +138,9 @@ class SpotifyProvider(BaseProvider):
             log.debug("search_and_play: Spotify client not initialised")
             return False
         try:
-            query = f"track:{track}"
-            if artist:
-                query += f" artist:{artist}"
-            results = self._sp.search(q=query, type="track", limit=5)
-            items = results.get("tracks", {}).get("items", [])
-            if not items:
-                log.debug("search_and_play: no results for %r", query)
-                return False
-
-            matched = self._fuzzy_pick(items, track, artist)
+            matched = self._search_track(track, artist)
             if matched is None:
-                log.debug("search_and_play: no fuzzy match among %d results", len(items))
+                log.debug("search_and_play: no match found for %r by %r", track, artist)
                 return False
 
             playback_kw = {"uris": [matched["uri"]]}
@@ -160,12 +151,25 @@ class SpotifyProvider(BaseProvider):
             try:
                 self._sp.start_playback(**playback_kw)
             except Exception as e:
-                err = str(e).lower()
-                if "no active device" in err or "player command failed" in err:
-                    log.debug("search_and_play: no active Spotify device — %s", e)
+                code = getattr(e, "http_status", None)
+                reason = getattr(e, "msg", str(e))
+                if code == 404:
+                    log.debug("search_and_play: HTTP 404 — no active device (%s)", reason)
                     self.last_error = "no_active_device"
-                    return False
-                raise
+                elif code == 403:
+                    log.debug("search_and_play: HTTP 403 — Premium required (%s)", reason)
+                    self.last_error = "premium_required"
+                elif code == 502 or code == 503:
+                    log.debug("search_and_play: HTTP %d — Spotify server error (%s)", code, reason)
+                    self.last_error = "server_error"
+                else:
+                    err = str(e).lower()
+                    if "no active device" in err or "player command failed" in err:
+                        self.last_error = "no_active_device"
+                    else:
+                        self.last_error = f"playback_error_{code or 'unknown'}"
+                    log.debug("search_and_play: playback failed (HTTP %s) — %s", code, reason)
+                return False
 
             self.last_error = None
             log.info("Spotify playback started: %s (offset %d ms)",
@@ -176,15 +180,53 @@ class SpotifyProvider(BaseProvider):
             self.last_error = str(e)
             return False
 
+    def _search_track(self, track: str, artist: str) -> Optional[dict]:
+        """Search Spotify with structured query first, then plain-text fallback."""
+        norm_track = self._normalize(track)
+        norm_artist = self._normalize(artist) if artist else ""
+
+        structured = f"track:{track}"
+        if artist:
+            structured += f" artist:{artist}"
+        results = self._sp.search(q=structured, type="track", limit=5)
+        items = results.get("tracks", {}).get("items", [])
+        if items:
+            matched = self._fuzzy_pick(items, track, artist)
+            if matched:
+                return matched
+            log.debug("Structured search had %d results but no fuzzy match", len(items))
+
+        plain = f"{norm_track} {norm_artist}".strip()
+        log.debug("Falling back to plain search: %r", plain)
+        results = self._sp.search(q=plain, type="track", limit=10)
+        items = results.get("tracks", {}).get("items", [])
+        if items:
+            matched = self._fuzzy_pick(items, track, artist)
+            if matched:
+                return matched
+            if len(items) >= 1 and norm_track:
+                top = items[0]
+                top_name = self._normalize(top.get("name", ""))
+                if top_name and (norm_track.startswith(top_name) or top_name.startswith(norm_track)):
+                    log.debug("Accepting top result by prefix: %r", top.get("name"))
+                    return top
+        return None
+
     _STRIP_SUFFIXES = re.compile(
-        r"\s*[\-–—]\s*(single|deluxe|remaster(ed)?|bonus track|"
-        r"expanded|anniversary|live|remix|version|edition)"
+        r"\s*[\-–—]\s*(single|deluxe|remaster(ed)?(\s*\d{4})?|bonus\s*track|"
+        r"expanded|anniversary|live|remix|version|edition|"
+        r"explicit|clean|mono|stereo|radio\s*edit|acoustic|"
+        r"original\s*mix|extended|instrumental|interlude|skit)"
         r".*$",
         re.IGNORECASE,
     )
     _PAREN_NOISE = re.compile(
-        r"\s*\((?:remaster(ed)?|deluxe|single|bonus|expanded|anniversary|"
-        r"live|remix|feat\.?[^)]*|version|edition)[^)]*\)",
+        r"\s*[\(\[](?:remaster(ed)?(\s*\d{4})?|deluxe(\s*edition)?|"
+        r"single|bonus|expanded|anniversary(\s*edition)?|"
+        r"live|remix|feat\.?[^)\]]*|ft\.?[^)\]]*|with\s+[^)\]]*|"
+        r"version|edition|explicit|clean|mono|stereo|"
+        r"radio\s*edit|acoustic|original\s*mix|extended|"
+        r"instrumental|from\s+[^)\]]*|prod\.?\s*[^)\]]*)[^)\]]*[\)\]]",
         re.IGNORECASE,
     )
 

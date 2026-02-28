@@ -82,9 +82,24 @@ class DiscordPresence:
         if not (track_changed or seeked or cover_changed or stale):
             return
 
-        safe_track = urllib.parse.quote(details[:50], safe="")
-        safe_artist = urllib.parse.quote(artist[:30], safe="")
-        join_secret = f"eternalrp://sync?track={safe_track}&artist={safe_artist}&pos={pos}"
+        max_track = min(len(details), 80)
+        max_artist = min(len(artist), 40)
+        while max_track > 10 or max_artist > 10:
+            safe_track = urllib.parse.quote(details[:max_track], safe="")
+            safe_artist = urllib.parse.quote(artist[:max_artist], safe="")
+            join_secret = f"eternalrp://sync?track={safe_track}&artist={safe_artist}&pos={pos}"
+            if len(join_secret) <= 128:
+                break
+            if max_track > max_artist and max_track > 10:
+                max_track -= 5
+            elif max_artist > 10:
+                max_artist -= 5
+            else:
+                max_track -= 5
+        else:
+            safe_track = urllib.parse.quote(details[:max_track], safe="")
+            safe_artist = urllib.parse.quote(artist[:max_artist], safe="")
+            join_secret = f"eternalrp://sync?track={safe_track}&artist={safe_artist}&pos={pos}"
         if len(join_secret) > 128:
             join_secret = join_secret[:128]
 

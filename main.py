@@ -143,13 +143,32 @@ def run_listener_mode(uri: str) -> int:
             if sp.search_and_play(track_name, artist_name, position_ms=position_ms):
                 log.info("Playback started on Spotify: %s at %ds", display, position_sec)
                 return 0
-            if sp.last_error == "no_active_device":
+            err = sp.last_error or ""
+            if err == "no_active_device":
                 _msgbox(
                     "Spotify is open but idle.\n\n"
-                    "Please press Play once on your Spotify app so we\n"
-                    "can sync your music!",
+                    "Please press Play on any song in your Spotify\n"
+                    "app first, then try Listen Along again.",
+                    "Listen Along — No Active Device",
                     info=True,
                 )
+            elif err == "premium_required":
+                _msgbox(
+                    "Listen Along requires a Spotify Premium account\n"
+                    "to control playback remotely.\n\n"
+                    "Falling back to Apple Music search.",
+                    "Listen Along — Premium Required",
+                    info=True,
+                )
+            elif err == "server_error":
+                _msgbox(
+                    "Spotify's servers are temporarily unavailable.\n"
+                    "Please try again in a moment.",
+                    "Listen Along — Spotify Error",
+                    info=True,
+                )
+            else:
+                log.debug("Spotify join failed (reason: %s)", err)
             log.debug("Spotify search_and_play returned False, falling back to Apple Music")
     except Exception:
         log.debug("Spotify sync unavailable, falling back to Apple Music", exc_info=True)
@@ -254,6 +273,25 @@ def run_host_mode() -> int:
         dp.disconnect()
 
     atexit.register(_cleanup)
+
+    # --- Discord event listener (receives ACTIVITY_JOIN from Discord) ---
+    evt_listener = None
+    try:
+        from discord_events import DiscordEventListener
+
+        def _on_join_event(secret: str):
+            log.info("ACTIVITY_JOIN received via event listener: %s", secret)
+            threading.Thread(
+                target=run_listener_mode,
+                args=(secret,),
+                daemon=True,
+            ).start()
+
+        evt_listener = DiscordEventListener(CLIENT_ID, _on_join_event)
+        evt_listener.start()
+        log.info("Discord event listener started")
+    except Exception as e:
+        log.warning("Discord event listener failed to start: %s", e)
 
     # --- background poll loop ---
     stop_event = threading.Event()
@@ -389,19 +427,42 @@ def run_host_mode() -> int:
             stop_event.set()
             icon.stop()
 
-        def on_log_join_secret(_icon, _item):
+        def _build_listen_link():
+            """Build the current Listen Along link from dp state."""
             t = dp.current_track
             if t is None:
-                log.info("[DEBUG] No track playing — no join_secret to show")
-                return
+                return None
             import urllib.parse as _up
             pos = int(t.position_sec) if t.position_sec is not None else 0
-            safe_t = _up.quote(t.title[:50], safe="")
-            safe_a = _up.quote(t.artist[:30], safe="")
-            secret = f"eternalrp://sync?track={safe_t}&artist={safe_a}&pos={pos}"
-            if len(secret) > 128:
-                secret = secret[:128]
-            log.info("[DEBUG] Current join_secret: %s", secret)
+            safe_t = _up.quote(t.title[:80], safe="")
+            safe_a = _up.quote(t.artist[:40], safe="")
+            return f"eternalrp://sync?track={safe_t}&artist={safe_a}&pos={pos}"
+
+        def on_copy_listen_link(_icon, _item):
+            link = _build_listen_link()
+            if link is None:
+                _msgbox(
+                    "No track is currently playing.\n"
+                    "Start playing music first.",
+                    "Listen Along",
+                    info=True,
+                )
+                return
+            try:
+                import subprocess
+                subprocess.run(
+                    ["clip"], input=link.encode(), check=True, creationflags=0x08000000
+                )
+                log.info("Listen Along link copied: %s", link)
+            except Exception:
+                _msgbox(f"Listen Along link:\n{link}", info=True)
+
+        def on_log_join_secret(_icon, _item):
+            link = _build_listen_link()
+            if link is None:
+                log.info("[DEBUG] No track playing — no join_secret to show")
+                return
+            log.info("[DEBUG] Current join_secret: %s", link)
 
         debug_menu = pystray.Menu(
             pystray.MenuItem(_discord_status_label, lambda: None, enabled=False),
@@ -420,6 +481,7 @@ def run_host_mode() -> int:
             pystray.MenuItem(_now_playing_label, lambda: None, enabled=False),
             pystray.MenuItem(_provider_label, lambda: None, enabled=False),
             pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Copy Listen Along Link", on_copy_listen_link),
             pystray.MenuItem(
                 lambda _item: "Resume" if paused.is_set() else "Pause",
                 on_toggle,
@@ -450,6 +512,8 @@ def run_host_mode() -> int:
     # --- teardown ---
     log.info("Shutting down")
     stop_event.set()
+    if evt_listener:
+        evt_listener.stop()
     poll_thread.join(timeout=10)
     atexit.unregister(_cleanup)
     dp.disconnect()
@@ -525,13 +589,27 @@ def main():
 
     try:
         from utils import register_uri_scheme
-        if not register_uri_scheme(silent=True):
-            log.warning(
-                "Listen Along feature needs a one-time Admin run to set up "
-                "deep links. Right-click the app and choose 'Run as Administrator'."
-            )
-    except Exception:
-        pass
+        if register_uri_scheme(silent=True):
+            log.info("eternalrp:// protocol registered successfully")
+        else:
+            log.warning("eternalrp:// registration failed — Listen Along needs a one-time Admin run")
+            print("[!] eternalrp:// registration failed. Run as Administrator once to enable Listen Along.")
+    except Exception as e:
+        log.warning("eternalrp:// registration error: %s", e)
+        print(f"[!] eternalrp:// registration error: {e}")
+
+    try:
+        from config import CLIENT_ID as _cid
+        if _cid and _cid != "YOUR_DISCORD_CLIENT_ID":
+            from utils import register_discord_launch
+            if register_discord_launch(_cid, silent=True):
+                log.info("discord-%s:// protocol registered successfully", _cid)
+            else:
+                log.warning("discord-%s:// registration failed", _cid)
+                print(f"[!] discord-{_cid}:// registration failed. Listen Along may not work.")
+    except Exception as e:
+        log.warning("Discord protocol registration error: %s", e)
+        print(f"[!] Discord protocol registration error: {e}")
 
     if "--register-uri" in args:
         from utils import register_uri_scheme as _reg
@@ -547,8 +625,31 @@ def main():
     for a in args:
         if a.startswith("eternalrp://"):
             return run_listener_mode(a)
+        secret = _extract_discord_join(a)
+        if secret:
+            return run_listener_mode(secret)
 
     return run_host_mode()
+
+
+def _extract_discord_join(arg: str) -> str:
+    """Parse ``discord-{client_id}://join/{secret}`` into the raw join secret."""
+    if not arg.startswith("discord-"):
+        return ""
+    try:
+        rest = arg.split("://", 1)
+        if len(rest) < 2:
+            return ""
+        path = rest[1]
+        if path.startswith("join/"):
+            secret = urllib.parse.unquote(path[5:])
+        else:
+            secret = urllib.parse.unquote(path.lstrip("/"))
+        if secret.startswith("eternalrp://") or ("track=" in secret):
+            return secret if secret.startswith("eternalrp://") else f"eternalrp://sync?{secret}"
+        return ""
+    except Exception:
+        return ""
 
 
 def _is_admin() -> bool:
