@@ -1,6 +1,9 @@
 from typing import List, Optional
 
+from logger import get_logger
 from providers.base import BaseProvider, TrackInfo
+
+log = get_logger("erp.manager")
 
 
 class ProviderManager:
@@ -21,7 +24,8 @@ class ProviderManager:
                 if track is not None:
                     self._active = provider
                     return track
-            except Exception:
+            except Exception as e:
+                log.debug("Provider %s error: %s", provider.name, e)
                 continue
         self._active = None
         return None

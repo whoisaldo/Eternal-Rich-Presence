@@ -24,7 +24,6 @@ log = get_logger("erp.discord_events")
 
 _GENERIC_RW = 0xC0000000
 _OPEN_EXISTING = 3
-_INVALID_HANDLE = ctypes.wintypes.HANDLE(-1).value
 
 _kernel32 = ctypes.windll.kernel32
 _CreateFileW = _kernel32.CreateFileW
@@ -34,15 +33,25 @@ _WriteFile = _kernel32.WriteFile
 _CloseHandle = _kernel32.CloseHandle
 _PeekNamedPipe = _kernel32.PeekNamedPipe
 
+_INVALID_HANDLE = ctypes.wintypes.HANDLE(-1).value
+
+
+def _is_valid_handle(h) -> bool:
+    return h is not None and h != 0 and h != _INVALID_HANDLE
+
 
 def _open_pipe() -> Optional[int]:
     """Connect to the first available Discord IPC pipe."""
     for i in range(10):
         path = f"\\\\.\\pipe\\discord-ipc-{i}"
-        handle = _CreateFileW(
-            path, _GENERIC_RW, 0, None, _OPEN_EXISTING, 0, None
-        )
-        if handle != _INVALID_HANDLE:
+        try:
+            handle = _CreateFileW(
+                path, _GENERIC_RW, 0, None, _OPEN_EXISTING, 0, None
+            )
+        except OSError as e:
+            log.debug("Pipe %d unavailable: %s", i, e)
+            continue
+        if _is_valid_handle(handle):
             log.debug("Connected to Discord pipe %d", i)
             return handle
     return None
@@ -53,16 +62,33 @@ def _write(handle: int, op: int, payload: dict):
     header = struct.pack("<II", op, len(data))
     buf = header + data
     written = ctypes.wintypes.DWORD(0)
-    _WriteFile(handle, buf, len(buf), ctypes.byref(written), None)
+    if not _WriteFile(handle, buf, len(buf), ctypes.byref(written), None):
+        raise _PipeBroken("WriteFile failed")
+
+
+class _PipeBroken(Exception):
+    """Raised when the Discord IPC pipe is no longer readable."""
 
 
 def _read(handle: int, timeout_ms: int = 5000) -> Optional[dict]:
-    """Blocking read of a single RPC frame with timeout."""
+    """Blocking read of a single RPC frame with timeout.
+
+    Returns the parsed JSON dict, ``None`` on timeout, or raises
+    ``_PipeBroken`` if the pipe has been closed by Discord.
+    """
     deadline = time.monotonic() + timeout_ms / 1000.0
+    peek_failures = 0
     while time.monotonic() < deadline:
         avail = ctypes.wintypes.DWORD(0)
         ok = _PeekNamedPipe(handle, None, 0, None, ctypes.byref(avail), None)
-        if ok and avail.value >= 8:
+        if not ok:
+            peek_failures += 1
+            if peek_failures > 3:
+                raise _PipeBroken("PeekNamedPipe failed repeatedly")
+            time.sleep(0.1)
+            continue
+        peek_failures = 0
+        if avail.value >= 8:
             break
         time.sleep(0.05)
     else:
@@ -71,15 +97,22 @@ def _read(handle: int, timeout_ms: int = 5000) -> Optional[dict]:
     header_buf = ctypes.create_string_buffer(8)
     read_n = ctypes.wintypes.DWORD(0)
     if not _ReadFile(handle, header_buf, 8, ctypes.byref(read_n), None):
-        return None
+        raise _PipeBroken("ReadFile header failed")
     if read_n.value < 8:
-        return None
+        raise _PipeBroken("Short header read")
     op, length = struct.unpack("<II", header_buf.raw)
+
+    if length > 1024 * 1024:
+        raise _PipeBroken(f"Implausible frame length: {length}")
 
     body_buf = ctypes.create_string_buffer(length)
     if not _ReadFile(handle, body_buf, length, ctypes.byref(read_n), None):
-        return None
-    return json.loads(body_buf.raw[: read_n.value].decode("utf-8"))
+        raise _PipeBroken("ReadFile body failed")
+    try:
+        return json.loads(body_buf.raw[: read_n.value].decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        log.warning("Invalid RPC frame JSON: %s", e)
+        raise _PipeBroken("Invalid JSON in RPC frame")
 
 
 class DiscordEventListener:
@@ -102,8 +135,8 @@ class DiscordEventListener:
         if self._handle is not None:
             try:
                 _CloseHandle(self._handle)
-            except Exception:
-                pass
+            except Exception as e:
+                log.debug("CloseHandle on stop: %s", e)
             self._handle = None
 
     def _run(self):
@@ -119,13 +152,13 @@ class DiscordEventListener:
                 self._subscribe()
                 self._event_loop()
             except Exception as e:
-                log.debug("Event listener error: %s", e)
+                log.warning("Event listener error (will retry): %s", e, exc_info=True)
             finally:
                 if self._handle is not None:
                     try:
                         _CloseHandle(self._handle)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        log.debug("CloseHandle in finally: %s", e)
                     self._handle = None
             if not self._stop.is_set():
                 self._stop.wait(5)
@@ -153,7 +186,12 @@ class DiscordEventListener:
 
     def _event_loop(self):
         while not self._stop.is_set():
-            data = _read(self._handle, timeout_ms=2000)
+            try:
+                data = _read(self._handle, timeout_ms=2000)
+            except _PipeBroken as e:
+                log.debug("Event pipe broken, will reconnect: %s", e)
+                return
+
             if data is None:
                 continue
 
@@ -179,5 +217,5 @@ class DiscordEventListener:
                             "args": {"user_id": uid},
                             "nonce": os.urandom(4).hex(),
                         })
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        log.debug("SEND_ACTIVITY_JOIN_INVITE failed: %s", e)

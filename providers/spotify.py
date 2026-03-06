@@ -61,7 +61,7 @@ class SpotifyProvider(BaseProvider):
             log.debug("Spotify client initialized")
         except Exception as e:
             self._sp = None
-            log.debug("Spotify init failed: %s", e)
+            log.warning("Spotify init failed: %s", e)
 
     def is_available(self) -> bool:
         if self._sp is None:
@@ -69,7 +69,8 @@ class SpotifyProvider(BaseProvider):
         try:
             current = self._sp.current_playback()
             return current is not None and current.get("is_playing", False)
-        except Exception:
+        except Exception as e:
+            log.debug("Spotify is_available: %s", e)
             return False
 
     def get_now_playing(self) -> Optional[TrackInfo]:
@@ -102,7 +103,8 @@ class SpotifyProvider(BaseProvider):
                 cover_art=cover_art,
                 is_playing=is_playing,
             )
-        except Exception:
+        except Exception as e:
+            log.debug("Spotify get_now_playing: %s", e)
             return None
 
     def _fetch_cover(self, album_info: dict) -> Optional[bytes]:
@@ -120,8 +122,8 @@ class SpotifyProvider(BaseProvider):
                 try:
                     with urllib.request.urlopen(img_url, timeout=5) as resp:
                         self._cached_cover = resp.read()
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.debug("Spotify cover fetch failed: %s", e)
         return self._cached_cover
 
     def search_and_play(self, track: str, artist: str = "",
@@ -176,7 +178,7 @@ class SpotifyProvider(BaseProvider):
                      matched.get("name", track), adjusted_ms)
             return True
         except Exception as e:
-            log.debug("search_and_play failed: %s", e)
+            log.warning("search_and_play failed: %s", e, exc_info=True)
             self.last_error = str(e)
             return False
 

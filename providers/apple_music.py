@@ -51,7 +51,8 @@ def _smtc_elapsed_since_update(timeline) -> float:
         updated_unix = (filetime - _WIN_EPOCH_OFFSET) / 10_000_000
         elapsed = time.time() - updated_unix
         return max(0.0, elapsed)
-    except Exception:
+    except Exception as e:
+        log.debug("_smtc_elapsed_since_update: %s", e)
         return 0.0
 
 
@@ -76,17 +77,18 @@ class AppleMusicProvider(BaseProvider):
             self._itunes = win32com.client.Dispatch("iTunes.Application")
             _ = self._itunes.CurrentTrack
             log.debug("Using iTunes COM")
-        except Exception:
+        except Exception as e:
             self._itunes = None
             self._use_smtc = True
-            log.debug("iTunes COM unavailable, using SMTC")
+            log.debug("iTunes COM unavailable (%s), using SMTC", e)
 
     def is_available(self) -> bool:
         if self._itunes is not None:
             try:
                 _ = self._itunes.CurrentTrack
                 return True
-            except Exception:
+            except Exception as e:
+                log.debug("iTunes is_available check failed: %s", e)
                 return False
         return self._poll_smtc() is not None
 
@@ -106,7 +108,8 @@ class AppleMusicProvider(BaseProvider):
                 album=getattr(track, "Album", None) or "",
                 position_sec=getattr(self._itunes, "PlayerPosition", 0) or 0,
             )
-        except Exception:
+        except Exception as e:
+            log.debug("iTunes _poll_itunes: %s", e)
             return None
 
     def _poll_smtc(self) -> Optional[TrackInfo]:
@@ -127,8 +130,8 @@ class AppleMusicProvider(BaseProvider):
                         all_s = manager.get_sessions()
                         if all_s:
                             sessions = list(all_s)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        log.debug("SMTC get_sessions: %s", e)
 
                 for s in sessions:
                     if s is None:
@@ -151,8 +154,8 @@ class AppleMusicProvider(BaseProvider):
                                     raw_sec = pos.total_seconds()
                                     elapsed = _smtc_elapsed_since_update(timeline)
                                     pos_sec = int(raw_sec + elapsed)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            log.debug("SMTC timeline/position: %s", e)
 
                         thumbnail_bytes = await self._read_thumbnail(props)
 
@@ -163,10 +166,12 @@ class AppleMusicProvider(BaseProvider):
                             position_sec=pos_sec,
                             cover_art=thumbnail_bytes,
                         )
-                    except Exception:
+                    except Exception as e:
+                        log.debug("SMTC session props: %s", e)
                         continue
                 return None
-            except Exception:
+            except Exception as e:
+                log.debug("SMTC _fetch: %s", e)
                 return None
 
         result = [None]
@@ -183,7 +188,7 @@ class AppleMusicProvider(BaseProvider):
         return result[0]
 
     @staticmethod
-    async def _read_thumbnail(props) -> bytes | None:
+    async def _read_thumbnail(props) -> Optional[bytes]:
         """Read cover art with a short timeout; returns None on any failure."""
         try:
             thumb_ref = getattr(props, "thumbnail", None)
@@ -199,5 +204,9 @@ class AppleMusicProvider(BaseProvider):
                 return bytes(bytearray(buf)[:n])
 
             return await asyncio.wait_for(_do_read(), timeout=3)
-        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+        except (asyncio.TimeoutError, asyncio.CancelledError) as e:
+            log.debug("Thumbnail read timeout/cancel: %s", e)
+            return None
+        except Exception as e:
+            log.debug("Thumbnail read failed: %s", e)
             return None

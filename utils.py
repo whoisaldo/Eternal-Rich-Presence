@@ -3,6 +3,10 @@ import sys
 import urllib.request
 from typing import Optional
 
+from logger import get_logger
+
+log = get_logger("erp.utils")
+
 
 def app_dir() -> str:
     """Absolute path to the application directory (handles PyInstaller frozen builds)."""
@@ -37,8 +41,8 @@ def upload_cover_to_catbox(thumbnail_bytes: bytes) -> Optional[str]:
             url = resp.read().decode().strip()
             if url and "catbox.moe" in url and url.startswith("http") and len(url) < 500:
                 return url
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug("Cover upload to catbox failed: %s", e)
     return None
 
 
@@ -62,6 +66,7 @@ def register_uri_scheme(exe_path: str = None, silent: bool = False) -> bool:
             winreg.SetValueEx(k, None, 0, winreg.REG_SZ, command)
         return True
     except OSError as e:
+        log.warning("URI registration failed: %s (run as Administrator)", e)
         if not silent:
             print(f"URI registration failed (try running as Administrator): {e}", file=sys.stderr)
         return False
@@ -95,6 +100,7 @@ def register_discord_launch(client_id: str, exe_path: str = None, silent: bool =
             winreg.SetValueEx(k, None, 0, winreg.REG_SZ, command)
         return True
     except OSError as e:
+        log.warning("Discord protocol registration failed: %s", e)
         if not silent:
             print(f"Discord protocol registration failed: {e}", file=sys.stderr)
         return False

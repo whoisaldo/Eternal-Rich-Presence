@@ -39,8 +39,8 @@ class DiscordPresence:
             self._rpc.clear(pid=os.getpid())
             time.sleep(0.5)
             self._rpc.close()
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("RPC disconnect (clear/close): %s", e)
         self._rpc = None
         log.debug("RPC disconnected")
 
@@ -121,15 +121,19 @@ class DiscordPresence:
 
         self._last_cover_url_sent = cover_url
         self._last_update_time = now
-        self._rpc.update(**update_kw)
+        try:
+            self._rpc.update(**update_kw)
+        except Exception as e:
+            log.error("Discord RPC update failed: %s (track=%s)", e, details, exc_info=True)
+            return
 
     def clear(self):
         if self._rpc is None:
             return
         try:
             self._rpc.clear(pid=os.getpid())
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("RPC clear failed: %s", e)
         self._last_track_key = None
         self._locked_start = None
 
@@ -145,5 +149,5 @@ class DiscordPresence:
             if self._cached_cover_url:
                 log.debug("Cover art uploaded: %s", self._cached_cover_url)
             else:
-                log.debug("Cover art upload failed (hash %s)", thumb_hash[:8])
+                log.warning("Cover art upload failed (hash %s)", thumb_hash[:8])
         return self._cached_cover_url

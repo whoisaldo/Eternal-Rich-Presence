@@ -70,8 +70,8 @@ def _msgbox(text: str, title: str = "EternalRichPresence", info: bool = False):
         MB_TASKMODAL = 0x00002000
         flags = (0x40 if info else 0x10) | MB_SETFOREGROUND | MB_TASKMODAL
         ctypes.windll.user32.MessageBoxW(0, text, title, flags)
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("MessageBox failed: %s", e)
 
 
 def _icon_path():
@@ -97,8 +97,8 @@ def _load_tray_icon():
     if path:
         try:
             return Image.open(path)
-        except Exception:
-            log.warning("Could not load tray icon from %s", path)
+        except Exception as e:
+            log.warning("Could not load tray icon from %s: %s", path, e)
     return Image.new("RGB", (64, 64), (252, 60, 68))
 
 
@@ -139,7 +139,12 @@ def run_listener_mode(uri: str) -> int:
         from config import SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET
         if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
             from providers.spotify import SpotifyProvider
-            sp = SpotifyProvider(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET)
+            try:
+                from config import SPOTIFY_REDIRECT_URI
+            except ImportError:
+                SPOTIFY_REDIRECT_URI = "http://localhost:8888/callback"
+            redirect = SPOTIFY_REDIRECT_URI or "http://localhost:8888/callback"
+            sp = SpotifyProvider(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, redirect)
             if sp.search_and_play(track_name, artist_name, position_ms=position_ms):
                 log.info("Playback started on Spotify: %s at %ds", display, position_sec)
                 return 0
@@ -170,8 +175,8 @@ def run_listener_mode(uri: str) -> int:
             else:
                 log.debug("Spotify join failed (reason: %s)", err)
             log.debug("Spotify search_and_play returned False, falling back to Apple Music")
-    except Exception:
-        log.debug("Spotify sync unavailable, falling back to Apple Music", exc_info=True)
+    except Exception as e:
+        log.warning("Spotify sync unavailable (falling back to Apple Music): %s", e, exc_info=True)
 
     search_query = f"{track_name} {artist_name}".strip()
     if search_query and search_query != "Unknown Track":
@@ -183,8 +188,8 @@ def run_listener_mode(uri: str) -> int:
             import webbrowser
             webbrowser.open(search_url)
             log.info("Opened Apple Music search fallback: %s", search_url)
-        except Exception:
-            log.info("Search manually: %s", search_url)
+        except Exception as e:
+            log.warning("Could not open browser for Apple Music search: %s — use: %s", e, search_url)
 
     return 0
 
@@ -341,8 +346,8 @@ def run_host_mode() -> int:
         if tray:
             try:
                 tray.stop()
-            except Exception:
-                pass
+            except Exception as e:
+                log.debug("Tray stop on SIGINT: %s", e)
 
     signal.signal(signal.SIGINT, _sigint_handler)
 
@@ -394,7 +399,8 @@ def run_host_mode() -> int:
             log.info("Opening log file: %s", LOG_PATH)
             try:
                 os.startfile(LOG_PATH)
-            except Exception:
+            except Exception as e:
+                log.warning("Could not open log file: %s", e)
                 _msgbox(f"Log file:\n{LOG_PATH}")
 
         def on_copy_log_path(_icon, _item):
@@ -403,7 +409,9 @@ def run_host_mode() -> int:
                 subprocess.run(
                     ["clip"], input=LOG_PATH.encode(), check=True, creationflags=0x08000000
                 )
-            except Exception:
+                log.debug("Log path copied to clipboard")
+            except Exception as e:
+                log.warning("Clipboard copy failed: %s", e)
                 _msgbox(f"Log path:\n{LOG_PATH}")
 
         def on_about(_icon, _item):
@@ -454,7 +462,8 @@ def run_host_mode() -> int:
                     ["clip"], input=link.encode(), check=True, creationflags=0x08000000
                 )
                 log.info("Listen Along link copied: %s", link)
-            except Exception:
+            except Exception as e:
+                log.warning("Clipboard copy failed: %s — showing link in dialog", e)
                 _msgbox(f"Listen Along link:\n{link}", info=True)
 
         def on_log_join_secret(_icon, _item):
@@ -543,24 +552,24 @@ def _clear_presence() -> int:
         rpc.clear(pid=os.getpid())
         try:
             rpc.clear(pid=0)
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("clear(pid=0) failed (non-fatal): %s", e)
         try:
             rpc.update(state="", details="", pid=os.getpid())
             time.sleep(0.3)
             rpc.clear(pid=os.getpid())
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("Interim clear failed (non-fatal): %s", e)
         log.info("Rich Presence cleared")
     except Exception as e:
-        log.error("Could not clear: %s", e)
+        log.error("Could not clear presence: %s", e, exc_info=True)
         _msgbox(f"Could not clear (is Discord running?):\n{e}")
         return 1
     finally:
         try:
             rpc.close()
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("RPC close: %s", e)
     return 0
 
 
@@ -648,14 +657,16 @@ def _extract_discord_join(arg: str) -> str:
         if secret.startswith("eternalrp://") or ("track=" in secret):
             return secret if secret.startswith("eternalrp://") else f"eternalrp://sync?{secret}"
         return ""
-    except Exception:
+    except Exception as e:
+        log.debug("_extract_discord_join failed for %r: %s", arg[:80] if arg else "", e)
         return ""
 
 
 def _is_admin() -> bool:
     try:
         return ctypes.windll.shell32.IsUserAnAdmin() != 0
-    except Exception:
+    except Exception as e:
+        log.debug("IsUserAnAdmin failed: %s", e)
         return False
 
 
