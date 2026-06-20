@@ -13,3 +13,15 @@ build/
 eternalrp.log
 eternalrp.log.*
 EternalRichPresence.exe
+release/
+
+# Editor / OS / misc
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+*.bak
+
+# Local-only standing brief (transferred manually between machines)
+CLAUDE.md
+claude.md

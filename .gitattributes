@@ -1,0 +1,9 @@
+# Normalize line endings: store text as LF in the repo, check out native.
+# Keeps diffs clean across contributors regardless of core.autocrlf.
+* text=auto eol=lf
+
+# Binary assets — never normalize or diff as text.
+*.png binary
+*.ico binary
+*.exe binary
+*.zip binary
