@@ -64,23 +64,23 @@ def _create_default_config() -> None:
         cid = EMBEDDED_CLIENT_ID or PLACEHOLDER_CLIENT_ID
         with open(cfg_path, "w", encoding="utf-8") as f:
             f.write(
-                '# Discord application Client ID (uses built-in if set).\n'
+                "# Discord application Client ID (uses built-in if set).\n"
                 f'CLIENT_ID = "{cid}"\n'
-                '\n'
+                "\n"
                 f'ASSET_KEY = "{DEFAULT_ASSET_KEY}"\n'
-                '\n'
-                '# Optional: Spotify credentials (leave empty to disable).\n'
+                "\n"
+                "# Optional: Spotify credentials (leave empty to disable).\n"
                 'SPOTIFY_CLIENT_ID = ""\n'
                 'SPOTIFY_CLIENT_SECRET = ""\n'
                 f'SPOTIFY_REDIRECT_URI = "{DEFAULT_SPOTIFY_REDIRECT_URI}"\n'
-                '\n'
+                "\n"
                 '# Privacy: auto-accept Discord "Listen Along" join requests.\n'
-                '# Set to False to ignore join requests from people who click Join.\n'
-                'AUTO_ACCEPT_JOIN_REQUESTS = True\n'
-                '\n'
-                '# Privacy: upload album art to a public host so Discord can show it.\n'
-                '# Set to False to use the static app icon instead.\n'
-                'COVER_ART_UPLOAD = True\n'
+                "# Set to False to ignore join requests from people who click Join.\n"
+                "AUTO_ACCEPT_JOIN_REQUESTS = True\n"
+                "\n"
+                "# Privacy: upload album art to a public host so Discord can show it.\n"
+                "# Set to False to use the static app icon instead.\n"
+                "COVER_ART_UPLOAD = True\n"
             )
         log.info("Created default config.py at %s", cfg_path)
     except Exception as e:
@@ -108,9 +108,7 @@ def _icon_path() -> Optional[str]:
         meipass = os.path.join(getattr(sys, "_MEIPASS", ""), _ICON_NAME)
         if os.path.isfile(meipass):
             return meipass
-        beside_exe = os.path.join(
-            os.path.dirname(os.path.abspath(sys.executable)), _ICON_NAME
-        )
+        beside_exe = os.path.join(os.path.dirname(os.path.abspath(sys.executable)), _ICON_NAME)
         if os.path.isfile(beside_exe):
             return beside_exe
     src = os.path.join(os.path.dirname(os.path.abspath(__file__)), _ICON_NAME)
@@ -121,6 +119,7 @@ def _icon_path() -> Optional[str]:
 
 def _load_tray_icon() -> "Image.Image":
     from PIL import Image
+
     path = _icon_path()
     if path:
         try:
@@ -135,10 +134,7 @@ def _open_apple_music_search(track_name: str, artist_name: str) -> bool:
     if not search_query or search_query == "Unknown Track":
         return False
 
-    search_url = (
-        "https://music.apple.com/search?term="
-        + urllib.parse.quote(search_query, safe="")
-    )
+    search_url = "https://music.apple.com/search?term=" + urllib.parse.quote(search_query, safe="")
     try:
         opened = webbrowser.open(search_url)
         if opened:
@@ -199,6 +195,7 @@ def _config_bool(name: str, default: bool = True) -> bool:
     """Read a boolean setting from config.py, returning ``default`` if unset."""
     try:
         import config
+
         return bool(getattr(config, name, default))
     except Exception:
         return default
@@ -222,6 +219,7 @@ def _build_spotify_provider():
         SPOTIFY_REDIRECT_URI = DEFAULT_SPOTIFY_REDIRECT_URI
     redirect = SPOTIFY_REDIRECT_URI or DEFAULT_SPOTIFY_REDIRECT_URI
     from providers.spotify import SpotifyProvider
+
     return SpotifyProvider(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, redirect)
 
 
@@ -271,8 +269,7 @@ def run_listener_mode(uri: str) -> int:
                 return 1
             elif err == "server_error":
                 _msgbox(
-                    "Spotify's servers are temporarily unavailable.\n"
-                    "Please try again in a moment.",
+                    "Spotify's servers are temporarily unavailable.\nPlease try again in a moment.",
                     "Listen Along — Spotify Error",
                     info=True,
                 )
@@ -309,8 +306,7 @@ def run_listener_mode(uri: str) -> int:
         return 0
 
     _msgbox(
-        "We couldn't start playback automatically.\n\n"
-        f"Search for this track manually:\n{display}",
+        f"We couldn't start playback automatically.\n\nSearch for this track manually:\n{display}",
         "Listen Along",
         info=True,
     )
@@ -333,6 +329,7 @@ def run_host_mode() -> int:
         _create_default_config()
         if "config" in sys.modules:
             import importlib
+
             importlib.reload(sys.modules["config"])
         log.info("Created config with embedded Discord Client ID")
 
@@ -341,6 +338,7 @@ def run_host_mode() -> int:
     # check was unreachable, so a placeholder config silently failed to connect.)
     try:
         from config import CLIENT_ID
+
         needs_setup = not CLIENT_ID or CLIENT_ID == PLACEHOLDER_CLIENT_ID
     except ImportError:
         needs_setup = True
@@ -349,14 +347,17 @@ def run_host_mode() -> int:
         log.info("Config missing or incomplete — launching setup GUI")
         try:
             from setup_gui import run_setup_gui
+
             if not run_setup_gui():
                 log.info("Setup cancelled by user")
                 return 1
             setup_completed = True
             import importlib
+
             if "config" in sys.modules:
                 importlib.reload(sys.modules["config"])
             from config import CLIENT_ID
+
             if not CLIENT_ID or CLIENT_ID == PLACEHOLDER_CLIENT_ID:
                 _msgbox("Discord Client ID is still not set. Please try again.")
                 return 1
@@ -385,6 +386,7 @@ def run_host_mode() -> int:
 
     try:
         from providers.apple_music import AppleMusicProvider
+
         provider_list.append(AppleMusicProvider())
         log.info("Apple Music provider loaded")
     except Exception:
@@ -430,7 +432,8 @@ def run_host_mode() -> int:
             ).start()
 
         evt_listener = DiscordEventListener(
-            CLIENT_ID, _on_join_event,
+            CLIENT_ID,
+            _on_join_event,
             auto_accept=_config_bool("AUTO_ACCEPT_JOIN_REQUESTS", True),
         )
         evt_listener.start()
@@ -602,20 +605,14 @@ def run_host_mode() -> int:
                 _open_path(_config_path())
             except Exception as e:
                 log.error("Could not open config file: %s", e, exc_info=True)
-                _msgbox(
-                    "The config file couldn't be opened.\n\n"
-                    f"Path:\n{_config_path()}"
-                )
+                _msgbox(f"The config file couldn't be opened.\n\nPath:\n{_config_path()}")
 
         def on_open_app_folder(_icon, _item):
             try:
                 _open_path(_app_dir)
             except Exception as e:
                 log.error("Could not open app folder: %s", e, exc_info=True)
-                _msgbox(
-                    "The app folder couldn't be opened.\n\n"
-                    f"Path:\n{_app_dir}"
-                )
+                _msgbox(f"The app folder couldn't be opened.\n\nPath:\n{_app_dir}")
 
         def on_repair_listen_along(_icon, _item):
             try:
@@ -638,8 +635,7 @@ def run_host_mode() -> int:
             except Exception as e:
                 log.error("Listen Along repair failed: %s", e, exc_info=True)
                 _msgbox(
-                    "Listen Along repair failed.\n\n"
-                    f"Check the log file for details:\n{LOG_PATH}"
+                    f"Listen Along repair failed.\n\nCheck the log file for details:\n{LOG_PATH}"
                 )
 
         def on_copy_log_path(_icon, _item):
@@ -696,16 +692,13 @@ def run_host_mode() -> int:
             link = _build_listen_link()
             if link is None:
                 _msgbox(
-                    "No track is currently playing.\n"
-                    "Start playing music first.",
+                    "No track is currently playing.\nStart playing music first.",
                     "Listen Along",
                     info=True,
                 )
                 return
             try:
-                subprocess.run(
-                    ["clip"], input=link.encode(), check=True, creationflags=0x08000000
-                )
+                subprocess.run(["clip"], input=link.encode(), check=True, creationflags=0x08000000)
                 log.info("Listen Along link copied: %s", link)
             except Exception as e:
                 log.warning("Clipboard copy failed: %s — showing link in dialog", e)
@@ -757,9 +750,7 @@ def run_host_mode() -> int:
             pystray.MenuItem("Exit", on_exit),
         )
 
-        tray = pystray.Icon(
-            APP_NAME, icon_image, APP_NAME, menu
-        )
+        tray = pystray.Icon(APP_NAME, icon_image, APP_NAME, menu)
         log.info("System tray started")
         _refresh_tray_title()
         if setup_completed:
@@ -774,8 +765,7 @@ def run_host_mode() -> int:
     except Exception as e:
         log.exception("System tray failed")
         _msgbox(
-            f"System tray failed to start:\n{e}\n\n"
-            "Falling back to console mode (Ctrl+C to quit)."
+            f"System tray failed to start:\n{e}\n\nFalling back to console mode (Ctrl+C to quit)."
         )
         try:
             while not stop_event.is_set():
@@ -867,6 +857,7 @@ def main() -> int:
 
     try:
         from utils import register_uri_scheme
+
         if register_uri_scheme(silent=True):
             log.info("eternalrp:// protocol registered successfully")
         else:
@@ -876,8 +867,10 @@ def main() -> int:
 
     try:
         from config import CLIENT_ID as _cid
+
         if _cid and _cid != PLACEHOLDER_CLIENT_ID:
             from utils import register_discord_launch
+
             if register_discord_launch(_cid, silent=True):
                 log.info("discord-%s:// protocol registered successfully", _cid)
             else:
@@ -887,11 +880,12 @@ def main() -> int:
 
     if "--register-uri" in args:
         from utils import register_uri_scheme as _reg
+
         ok = _reg()
         msg = (
             "Listen Along link registration is ready for this Windows account."
-            if ok else
-            "Listen Along link registration failed."
+            if ok
+            else "Listen Along link registration failed."
         )
         log.info(msg)
         _msgbox(msg, "Listen Along Registration", info=ok)
@@ -899,6 +893,7 @@ def main() -> int:
 
     if "--setup" in args:
         from setup_gui import run_setup_gui
+
         return 0 if run_setup_gui() else 1
 
     if "--open-config" in args:

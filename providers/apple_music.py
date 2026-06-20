@@ -87,6 +87,7 @@ class AppleMusicProvider(BaseProvider):
     def _init_source(self):
         try:
             import win32com.client
+
             self._itunes = win32com.client.Dispatch("iTunes.Application")
             _ = self._itunes.CurrentTrack
             log.debug("Using iTunes COM")
@@ -246,6 +247,7 @@ class AppleMusicProvider(BaseProvider):
 
             async def _do_read():
                 from winrt.windows.storage.streams import Buffer, InputStreamOptions
+
                 stream = await thumb_ref.open_read_async()
                 buf = Buffer(2 * 1024 * 1024)
                 await stream.read_async(buf, buf.capacity, InputStreamOptions.READ_AHEAD)

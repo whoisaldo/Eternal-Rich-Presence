@@ -20,8 +20,9 @@ class SpotifyProvider(BaseProvider):
     SCOPES = "user-read-currently-playing user-read-playback-state user-modify-playback-state"
     LATENCY_OFFSET_MS = 1500
 
-    def __init__(self, client_id: str, client_secret: str,
-                 redirect_uri: str = DEFAULT_SPOTIFY_REDIRECT_URI):
+    def __init__(
+        self, client_id: str, client_secret: str, redirect_uri: str = DEFAULT_SPOTIFY_REDIRECT_URI
+    ):
         self._client_id = client_id
         self._client_secret = client_secret
         self._redirect_uri = redirect_uri
@@ -55,6 +56,7 @@ class SpotifyProvider(BaseProvider):
         try:
             import spotipy
             from spotipy.oauth2 import SpotifyOAuth
+
             auth = SpotifyOAuth(
                 client_id=self._client_id,
                 client_secret=self._client_secret,
@@ -134,8 +136,7 @@ class SpotifyProvider(BaseProvider):
                     log.debug("Spotify cover fetch failed: %s", e)
         return self._cached_cover
 
-    def search_and_play(self, track: str, artist: str = "",
-                        position_ms: int = 0) -> bool:
+    def search_and_play(self, track: str, artist: str = "", position_ms: int = 0) -> bool:
         """Search for a track on Spotify and start playback on the active device.
 
         Args:
@@ -188,8 +189,11 @@ class SpotifyProvider(BaseProvider):
                 return False
 
             self.last_error = None
-            log.info("Spotify playback started: %s (offset %d ms)",
-                     matched.get("name", track), adjusted_ms)
+            log.info(
+                "Spotify playback started: %s (offset %d ms)",
+                matched.get("name", track),
+                adjusted_ms,
+            )
             return True
         except Exception as e:
             log.warning("search_and_play failed: %s", e, exc_info=True)
@@ -255,13 +259,9 @@ class SpotifyProvider(BaseProvider):
         artist_low = artist.lower().strip() if artist else ""
         for item in items:
             name_norm = cls._normalize(item.get("name", ""))
-            item_artists = " ".join(
-                a.get("name", "") for a in item.get("artists", [])
-            ).lower()
+            item_artists = " ".join(a.get("name", "") for a in item.get("artists", [])).lower()
             title_ok = track_norm in name_norm or name_norm in track_norm
-            artist_ok = (not artist_low
-                         or artist_low in item_artists
-                         or item_artists in artist_low)
+            artist_ok = not artist_low or artist_low in item_artists or item_artists in artist_low
             if title_ok and artist_ok:
                 return item
         return None

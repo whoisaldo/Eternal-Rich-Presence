@@ -17,8 +17,7 @@ class DiscordConnectionError(RuntimeError):
 class DiscordPresence:
     """Manages the Discord Rich Presence connection and per-track updates."""
 
-    def __init__(self, client_id: str, asset_key: str = "apple_music",
-                 cover_upload: bool = True):
+    def __init__(self, client_id: str, asset_key: str = "apple_music", cover_upload: bool = True):
         self._client_id = client_id
         self._asset_key = asset_key
         self._cover_upload = cover_upload
@@ -33,6 +32,7 @@ class DiscordPresence:
 
     def connect(self):
         from pypresence import Presence
+
         self._rpc = Presence(self._client_id)
         self._rpc.connect()
         log.debug("RPC handshake complete")

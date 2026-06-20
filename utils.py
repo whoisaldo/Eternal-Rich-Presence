@@ -50,15 +50,20 @@ def _multipart_post(
     for name, value in fields.items():
         parts.append(
             b"--" + boundary + b"\r\n"
-            b'Content-Disposition: form-data; name="' + name.encode() + b'"\r\n\r\n'
-            + value.encode() + b"\r\n"
+            b'Content-Disposition: form-data; name="'
+            + name.encode()
+            + b'"\r\n\r\n'
+            + value.encode()
+            + b"\r\n"
         )
     parts.append(
         b"--" + boundary + b"\r\n"
-        b'Content-Disposition: form-data; name="' + file_field.encode()
-        + b'"; filename="' + filename.encode() + b'"\r\n'
-        b"Content-Type: " + content_type.encode() + b"\r\n\r\n"
-        + file_bytes + b"\r\n"
+        b'Content-Disposition: form-data; name="'
+        + file_field.encode()
+        + b'"; filename="'
+        + filename.encode()
+        + b'"\r\n'
+        b"Content-Type: " + content_type.encode() + b"\r\n\r\n" + file_bytes + b"\r\n"
     )
     parts.append(b"--" + boundary + b"--\r\n")
 
@@ -180,10 +185,7 @@ def build_join_secret(track: str, artist: str = "", position_sec: int = 0) -> st
     if not encoded_track:
         return _JOIN_FALLBACK
 
-    return (
-        f"eternalrp://sync?track={encoded_track}"
-        f"&artist={encoded_artist}&pos={safe_pos}"
-    )
+    return f"eternalrp://sync?track={encoded_track}&artist={encoded_artist}&pos={safe_pos}"
 
 
 def parse_join_secret(uri: str) -> tuple[Optional[dict], Optional[str]]:
@@ -191,7 +193,7 @@ def parse_join_secret(uri: str) -> tuple[Optional[dict], Optional[str]]:
     if not uri or not uri.startswith("eternalrp://"):
         return None, "invalid_scheme"
 
-    payload = uri[len("eternalrp://"):]
+    payload = uri[len("eternalrp://") :]
     if "?" not in payload:
         legacy_track = urllib.parse.unquote(payload.replace("/", "").strip())
         if legacy_track:
@@ -253,8 +255,9 @@ def register_uri_scheme(exe_path: Optional[str] = None, silent: bool = False) ->
         return False
 
 
-def register_discord_launch(client_id: str, exe_path: Optional[str] = None,
-                            silent: bool = False) -> bool:
+def register_discord_launch(
+    client_id: str, exe_path: Optional[str] = None, silent: bool = False
+) -> bool:
     """Register discord-{client_id}:// protocol so Discord can launch the app on Join.
 
     This is the mechanism Discord uses when a user clicks "Join" on someone's

@@ -6,6 +6,7 @@ from typing import Optional
 @dataclass
 class TrackInfo:
     """Normalized track metadata returned by any music provider."""
+
     title: str = "Unknown"
     artist: str = "Unknown Artist"
     album: str = ""
@@ -19,8 +20,7 @@ class BaseProvider(ABC):
 
     @property
     @abstractmethod
-    def name(self) -> str:
-        ...
+    def name(self) -> str: ...
 
     @abstractmethod
     def is_available(self) -> bool:
@@ -29,5 +29,4 @@ class BaseProvider(ABC):
         ...
 
     @abstractmethod
-    def get_now_playing(self) -> Optional[TrackInfo]:
-        ...
+    def get_now_playing(self) -> Optional[TrackInfo]: ...

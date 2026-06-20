@@ -132,8 +132,7 @@ def _read(handle: int, timeout_ms: int = 5000) -> Optional[dict]:
 class DiscordEventListener:
     """Listens for ACTIVITY_JOIN events on a dedicated Discord IPC connection."""
 
-    def __init__(self, client_id: str, on_join: Callable[[str], None],
-                 auto_accept: bool = True):
+    def __init__(self, client_id: str, on_join: Callable[[str], None], auto_accept: bool = True):
         self._client_id = client_id
         self._on_join = on_join
         self._auto_accept = auto_accept
@@ -191,11 +190,15 @@ class DiscordEventListener:
     def _subscribe(self):
         for event_name in ("ACTIVITY_JOIN", "ACTIVITY_JOIN_REQUEST"):
             nonce = os.urandom(4).hex()
-            _write(self._handle, 1, {
-                "cmd": "SUBSCRIBE",
-                "evt": event_name,
-                "nonce": nonce,
-            })
+            _write(
+                self._handle,
+                1,
+                {
+                    "cmd": "SUBSCRIBE",
+                    "evt": event_name,
+                    "nonce": nonce,
+                },
+            )
             resp = _read(self._handle, timeout_ms=3000)
             if resp is None:
                 raise ConnectionError(f"Timed out subscribing to {event_name}")
@@ -236,10 +239,14 @@ class DiscordEventListener:
                 log.info("Auto-accepting join from %s", uname)
                 if uid:
                     try:
-                        _write(self._handle, 1, {
-                            "cmd": "SEND_ACTIVITY_JOIN_INVITE",
-                            "args": {"user_id": uid},
-                            "nonce": os.urandom(4).hex(),
-                        })
+                        _write(
+                            self._handle,
+                            1,
+                            {
+                                "cmd": "SEND_ACTIVITY_JOIN_INVITE",
+                                "args": {"user_id": uid},
+                                "nonce": os.urandom(4).hex(),
+                            },
+                        )
                     except Exception as e:
                         log.debug("SEND_ACTIVITY_JOIN_INVITE failed: %s", e)

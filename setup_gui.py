@@ -36,8 +36,9 @@ _BTN_HOVER = "#c73650"
 _ENTRY_BORDER = "#0f3460"
 
 
-def _write_config(client_id: str, asset_key: str,
-                  sp_id: str, sp_secret: str, sp_redirect: str) -> str:
+def _write_config(
+    client_id: str, asset_key: str, sp_id: str, sp_secret: str, sp_redirect: str
+) -> str:
     """Write config.py and return the file path.
 
     Values are written with ``!r`` so a quote/backslash/newline in any field
@@ -119,12 +120,20 @@ def run_setup_gui() -> bool:
     header.pack(fill="x", padx=30, pady=(24, 4))
 
     tk.Label(
-        header, text=APP_NAME, font=title_font,
-        fg=_ACCENT, bg=_BG, anchor="w",
+        header,
+        text=APP_NAME,
+        font=title_font,
+        fg=_ACCENT,
+        bg=_BG,
+        anchor="w",
     ).pack(anchor="w")
     tk.Label(
-        header, text=f"by {APP_AUTHOR}", font=subtitle_font,
-        fg=_FG_DIM, bg=_BG, anchor="w",
+        header,
+        text=f"by {APP_AUTHOR}",
+        font=subtitle_font,
+        fg=_FG_DIM,
+        bg=_BG,
+        anchor="w",
     ).pack(anchor="w")
 
     sep = tk.Frame(root, bg=_ACCENT, height=2)
@@ -139,13 +148,22 @@ def run_setup_gui() -> bool:
         frame = tk.Frame(parent, bg=_BG)
         frame.pack(fill="x", padx=30, pady=(0, 10))
         tk.Label(
-            frame, text=label_text, font=label_font,
-            fg=_FG, bg=_BG, anchor="w",
+            frame,
+            text=label_text,
+            font=label_font,
+            fg=_FG,
+            bg=_BG,
+            anchor="w",
         ).pack(anchor="w")
         entry = tk.Entry(
-            frame, font=entry_font, bg=_BG_FIELD, fg=_FG,
-            insertbackground=_FG, relief="flat",
-            highlightthickness=1, highlightcolor=_ACCENT,
+            frame,
+            font=entry_font,
+            bg=_BG_FIELD,
+            fg=_FG,
+            insertbackground=_FG,
+            relief="flat",
+            highlightthickness=1,
+            highlightcolor=_ACCENT,
             highlightbackground=_ENTRY_BORDER,
             show=show,
         )
@@ -330,8 +348,12 @@ def run_setup_gui() -> bool:
 
     status_var = tk.StringVar(value="")
     status_label = tk.Label(
-        root, textvariable=status_var, font=small_font,
-        fg=_ACCENT, bg=_BG, anchor="w",
+        root,
+        textvariable=status_var,
+        font=small_font,
+        fg=_ACCENT,
+        bg=_BG,
+        anchor="w",
     )
     status_label.pack(fill="x", padx=30, pady=(0, 4))
 
@@ -373,10 +395,18 @@ def run_setup_gui() -> bool:
     btn_frame.pack(fill="x", padx=30, pady=(8, 0))
 
     save_btn = tk.Button(
-        btn_frame, text="Save & Launch", font=btn_font,
-        bg=_BTN_BG, fg=_BTN_FG, activebackground=_BTN_HOVER,
-        activeforeground=_BTN_FG, relief="flat", cursor="hand2",
-        command=_on_save, padx=16, pady=6,
+        btn_frame,
+        text="Save & Launch",
+        font=btn_font,
+        bg=_BTN_BG,
+        fg=_BTN_FG,
+        activebackground=_BTN_HOVER,
+        activeforeground=_BTN_FG,
+        relief="flat",
+        cursor="hand2",
+        command=_on_save,
+        padx=16,
+        pady=6,
     )
     save_btn.pack(side="left")
 
@@ -384,17 +414,28 @@ def run_setup_gui() -> bool:
         webbrowser.open(APP_REPO_URL)
 
     help_btn = tk.Button(
-        btn_frame, text="Help / Setup Guide", font=label_font,
-        bg=_BG_FIELD, fg=_FG_DIM, activebackground=_ENTRY_BORDER,
-        activeforeground=_FG, relief="flat", cursor="hand2",
-        command=_on_help, padx=12, pady=6,
+        btn_frame,
+        text="Help / Setup Guide",
+        font=label_font,
+        bg=_BG_FIELD,
+        fg=_FG_DIM,
+        activebackground=_ENTRY_BORDER,
+        activeforeground=_FG,
+        relief="flat",
+        cursor="hand2",
+        command=_on_help,
+        padx=12,
+        pady=6,
     )
     help_btn.pack(side="right")
 
     footer = tk.Label(
         root,
         text="github.com/whoisaldo/Eternal-Rich-Presence",
-        font=small_font, fg=_FG_DIM, bg=_BG, cursor="hand2",
+        font=small_font,
+        fg=_FG_DIM,
+        bg=_BG,
+        cursor="hand2",
     )
     footer.pack(side="bottom", pady=(0, 12))
     footer.bind("<Button-1>", lambda _e: webbrowser.open(APP_REPO_URL))
