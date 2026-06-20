@@ -1,22 +1,27 @@
 import hashlib
 import os
 import time
-import urllib.parse
 from typing import Optional
 
 from logger import get_logger
 from providers.base import TrackInfo
-from utils import upload_cover_to_catbox
+from utils import build_join_secret, upload_cover_art
 
 log = get_logger("erp.presence")
+
+
+class DiscordConnectionError(RuntimeError):
+    """Raised when Discord RPC needs to be reconnected."""
 
 
 class DiscordPresence:
     """Manages the Discord Rich Presence connection and per-track updates."""
 
-    def __init__(self, client_id: str, asset_key: str = "apple_music"):
+    def __init__(self, client_id: str, asset_key: str = "apple_music",
+                 cover_upload: bool = True):
         self._client_id = client_id
         self._asset_key = asset_key
+        self._cover_upload = cover_upload
         self._rpc = None
         self._last_track_key: Optional[str] = None
         self._last_cover_hash: Optional[str] = None
@@ -49,7 +54,7 @@ class DiscordPresence:
 
     def update(self, track: TrackInfo, provider_name: str = ""):
         if self._rpc is None:
-            return
+            raise DiscordConnectionError("Discord RPC is not connected")
 
         cover_url = self._resolve_cover(track.cover_art)
 
@@ -82,26 +87,7 @@ class DiscordPresence:
         if not (track_changed or seeked or cover_changed or stale):
             return
 
-        max_track = min(len(details), 80)
-        max_artist = min(len(artist), 40)
-        while max_track > 10 or max_artist > 10:
-            safe_track = urllib.parse.quote(details[:max_track], safe="")
-            safe_artist = urllib.parse.quote(artist[:max_artist], safe="")
-            join_secret = f"eternalrp://sync?track={safe_track}&artist={safe_artist}&pos={pos}"
-            if len(join_secret) <= 128:
-                break
-            if max_track > max_artist and max_track > 10:
-                max_track -= 5
-            elif max_artist > 10:
-                max_artist -= 5
-            else:
-                max_track -= 5
-        else:
-            safe_track = urllib.parse.quote(details[:max_track], safe="")
-            safe_artist = urllib.parse.quote(artist[:max_artist], safe="")
-            join_secret = f"eternalrp://sync?track={safe_track}&artist={safe_artist}&pos={pos}"
-        if len(join_secret) > 128:
-            join_secret = join_secret[:128]
+        join_secret = build_join_secret(details, artist, pos)
 
         update_kw = dict(
             state=state,
@@ -111,6 +97,8 @@ class DiscordPresence:
             join=join_secret,
             start=self._locked_start,
         )
+        if provider_name:
+            update_kw["small_text"] = provider_name
 
         update_kw["large_image"] = cover_url if cover_url else self._asset_key
         update_kw["large_text"] = track.album or details
@@ -125,7 +113,8 @@ class DiscordPresence:
             self._rpc.update(**update_kw)
         except Exception as e:
             log.error("Discord RPC update failed: %s (track=%s)", e, details, exc_info=True)
-            return
+            self.disconnect()
+            raise DiscordConnectionError(str(e)) from e
 
     def clear(self):
         if self._rpc is None:
@@ -134,18 +123,22 @@ class DiscordPresence:
             self._rpc.clear(pid=os.getpid())
         except Exception as e:
             log.debug("RPC clear failed: %s", e)
+        # Nulling _last_track_key is what guarantees the next update() for the
+        # same track re-fires; the cover/time caches are intentionally left so a
+        # resume of identical art doesn't trigger a redundant re-upload.
         self._last_track_key = None
         self._locked_start = None
+        self.current_track = None
 
     def _resolve_cover(self, cover_art: Optional[bytes]) -> Optional[str]:
-        if not cover_art:
+        if not self._cover_upload or not cover_art:
             self._last_cover_hash = None
             self._cached_cover_url = None
             return None
         thumb_hash = hashlib.sha1(cover_art).hexdigest()
         if thumb_hash != self._last_cover_hash:
             self._last_cover_hash = thumb_hash
-            self._cached_cover_url = upload_cover_to_catbox(cover_art)
+            self._cached_cover_url = upload_cover_art(cover_art)
             if self._cached_cover_url:
                 log.debug("Cover art uploaded: %s", self._cached_cover_url)
             else:

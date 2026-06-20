@@ -1,19 +1,14 @@
 import os
 import re
-import sys
 import urllib.request
 from typing import Optional
 
+from app_info import APP_NAME, DEFAULT_SPOTIFY_REDIRECT_URI, app_root
 from logger import get_logger
+
 from .base import BaseProvider, TrackInfo
 
 log = get_logger("erp.spotify")
-
-
-def _app_dir() -> str:
-    if getattr(sys, "frozen", False):
-        return os.path.dirname(os.path.abspath(sys.executable))
-    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 class SpotifyProvider(BaseProvider):
@@ -26,7 +21,7 @@ class SpotifyProvider(BaseProvider):
     LATENCY_OFFSET_MS = 1500
 
     def __init__(self, client_id: str, client_secret: str,
-                 redirect_uri: str = "http://localhost:8888/callback"):
+                 redirect_uri: str = DEFAULT_SPOTIFY_REDIRECT_URI):
         self._client_id = client_id
         self._client_secret = client_secret
         self._redirect_uri = redirect_uri
@@ -41,10 +36,21 @@ class SpotifyProvider(BaseProvider):
         return "Spotify"
 
     def _token_cache_path(self) -> str:
-        return os.path.join(_app_dir(), ".spotify_token_cache")
+        # Prefer a per-user location (not synced by OneDrive, not next to a
+        # possibly shared exe); fall back to the app root if unavailable.
+        base = os.environ.get("LOCALAPPDATA", "")
+        if base:
+            cache_dir = os.path.join(base, APP_NAME)
+            try:
+                os.makedirs(cache_dir, exist_ok=True)
+                return os.path.join(cache_dir, ".spotify_token_cache")
+            except OSError as e:
+                log.debug("LOCALAPPDATA cache dir unavailable: %s", e)
+        return os.path.join(app_root(), ".spotify_token_cache")
 
     def _init_client(self):
         if not self._client_id or not self._client_secret:
+            self.last_error = "not_configured"
             return
         try:
             import spotipy
@@ -58,9 +64,11 @@ class SpotifyProvider(BaseProvider):
                 open_browser=True,
             )
             self._sp = spotipy.Spotify(auth_manager=auth)
+            self.last_error = None
             log.debug("Spotify client initialized")
         except Exception as e:
             self._sp = None
+            self.last_error = "init_failed"
             log.warning("Spotify init failed: %s", e)
 
     def is_available(self) -> bool:
@@ -77,7 +85,7 @@ class SpotifyProvider(BaseProvider):
         if self._sp is None:
             return None
         try:
-            current = self._sp.currently_playing()
+            current = self._sp.current_playback()
             if not current or not current.get("item"):
                 return None
 
@@ -93,7 +101,7 @@ class SpotifyProvider(BaseProvider):
             pos_sec = progress_ms // 1000
 
             cover_art = self._fetch_cover(album_info)
-            is_playing = current.get("is_playing", True)
+            is_playing = bool(current.get("is_playing"))
 
             return TrackInfo(
                 title=title,
@@ -138,11 +146,17 @@ class SpotifyProvider(BaseProvider):
         """
         if self._sp is None:
             log.debug("search_and_play: Spotify client not initialised")
+            self.last_error = "init_failed"
+            return False
+        if not (track or "").strip():
+            self.last_error = "invalid_track"
             return False
         try:
+            self.last_error = None
             matched = self._search_track(track, artist)
             if matched is None:
                 log.debug("search_and_play: no match found for %r by %r", track, artist)
+                self.last_error = "no_match"
                 return False
 
             playback_kw = {"uris": [matched["uri"]]}
@@ -179,7 +193,7 @@ class SpotifyProvider(BaseProvider):
             return True
         except Exception as e:
             log.warning("search_and_play failed: %s", e, exc_info=True)
-            self.last_error = str(e)
+            self.last_error = "unexpected_error"
             return False
 
     def _search_track(self, track: str, artist: str) -> Optional[dict]:
@@ -206,12 +220,6 @@ class SpotifyProvider(BaseProvider):
             matched = self._fuzzy_pick(items, track, artist)
             if matched:
                 return matched
-            if len(items) >= 1 and norm_track:
-                top = items[0]
-                top_name = self._normalize(top.get("name", ""))
-                if top_name and (norm_track.startswith(top_name) or top_name.startswith(norm_track)):
-                    log.debug("Accepting top result by prefix: %r", top.get("name"))
-                    return top
         return None
 
     _STRIP_SUFFIXES = re.compile(

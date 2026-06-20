@@ -5,6 +5,7 @@ import time
 from typing import Optional
 
 from logger import get_logger
+
 from .base import BaseProvider, TrackInfo
 
 log = get_logger("erp.apple_music")
@@ -23,7 +24,9 @@ def _quiet_threading_hook(args):
 
 
 def _quiet_unraisable_hook(unraisable):
-    if isinstance(unraisable.exc_value, RuntimeError) and "Event loop is closed" in str(unraisable.exc_value):
+    if isinstance(unraisable.exc_value, RuntimeError) and "Event loop is closed" in str(
+        unraisable.exc_value
+    ):
         return
     _orig_unraisable_hook(unraisable)
 
@@ -33,6 +36,14 @@ sys.unraisablehook = _quiet_unraisable_hook
 
 
 _WIN_EPOCH_OFFSET = 116444736000000000  # 100ns ticks between 1601-01-01 and 1970-01-01
+
+_PLAYBACK_PLAYING = 4
+_PLAYBACK_PAUSED = 5
+
+
+def _looks_like_apple_source(app_id: str) -> bool:
+    norm = (app_id or "").lower()
+    return "itunes" in norm or "applemusic" in norm or "apple music" in norm
 
 
 def _smtc_elapsed_since_update(timeline) -> float:
@@ -65,6 +76,8 @@ class AppleMusicProvider(BaseProvider):
     def __init__(self):
         self._itunes = None
         self._use_smtc = False
+        self._smtc_thread = None
+        self._last_smtc = None
         self._init_source()
 
     @property
@@ -102,11 +115,13 @@ class AppleMusicProvider(BaseProvider):
             track = self._itunes.CurrentTrack
             if track is None:
                 return None
+            state = int(getattr(self._itunes, "PlayerState", 0) or 0)
             return TrackInfo(
                 title=getattr(track, "Name", None) or "Unknown",
                 artist=getattr(track, "Artist", None) or "Unknown Artist",
                 album=getattr(track, "Album", None) or "",
                 position_sec=getattr(self._itunes, "PlayerPosition", 0) or 0,
+                is_playing=(state == 1),
             )
         except Exception as e:
             log.debug("iTunes _poll_itunes: %s", e)
@@ -133,10 +148,27 @@ class AppleMusicProvider(BaseProvider):
                     except Exception as e:
                         log.debug("SMTC get_sessions: %s", e)
 
+                paused_candidate = None
+                seen_ids = set()
+
                 for s in sessions:
                     if s is None:
                         continue
                     try:
+                        app_id = str(getattr(s, "source_app_user_model_id", "") or "")
+                        if app_id in seen_ids:
+                            continue
+                        seen_ids.add(app_id)
+                        if not _looks_like_apple_source(app_id):
+                            continue
+
+                        playback_info = s.get_playback_info()
+                        playback_status = getattr(playback_info, "playback_status", None)
+                        try:
+                            playback_status_value = int(playback_status)
+                        except Exception:
+                            playback_status_value = None
+
                         props = await s.try_get_media_properties_async()
                         if not props:
                             continue
@@ -159,20 +191,32 @@ class AppleMusicProvider(BaseProvider):
 
                         thumbnail_bytes = await self._read_thumbnail(props)
 
-                        return TrackInfo(
+                        track_info = TrackInfo(
                             title=title,
                             artist=artist,
                             album=album,
                             position_sec=pos_sec,
                             cover_art=thumbnail_bytes,
+                            is_playing=(playback_status_value == _PLAYBACK_PLAYING),
                         )
+                        if playback_status_value == _PLAYBACK_PLAYING:
+                            return track_info
+                        if playback_status_value == _PLAYBACK_PAUSED and paused_candidate is None:
+                            paused_candidate = track_info
                     except Exception as e:
                         log.debug("SMTC session props: %s", e)
                         continue
-                return None
+                return paused_candidate
             except Exception as e:
                 log.debug("SMTC _fetch: %s", e)
                 return None
+
+        # Don't pile up stuck worker threads if a winrt call ever hangs past the
+        # join timeout: skip this poll while a prior fetch is still running, and
+        # fall back to the last known state instead of a spurious None.
+        if self._smtc_thread is not None and self._smtc_thread.is_alive():
+            log.debug("Previous SMTC fetch still running; skipping this poll")
+            return self._last_smtc
 
         result = [None]
 
@@ -183,8 +227,13 @@ class AppleMusicProvider(BaseProvider):
                 log.debug("SMTC fetch error: %s", e)
 
         t = threading.Thread(target=_run_in_thread, daemon=True)
+        self._smtc_thread = t
         t.start()
-        t.join(timeout=15)
+        t.join(timeout=5)
+        if t.is_alive():
+            log.debug("SMTC fetch exceeded 5s; returning last known state")
+            return self._last_smtc
+        self._last_smtc = result[0]
         return result[0]
 
     @staticmethod

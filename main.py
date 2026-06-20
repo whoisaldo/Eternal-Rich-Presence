@@ -9,10 +9,12 @@ playback on the receiving end.
 import atexit
 import ctypes
 import os
+import subprocess
 import sys
 import threading
 import time
 import urllib.parse
+import webbrowser
 
 # --noconsole builds set stdout/stderr to None; redirect to devnull so prints
 # don't crash the process.
@@ -29,37 +31,63 @@ _app_dir = (
 if _app_dir and _app_dir not in sys.path:
     sys.path.insert(0, _app_dir)
 
-from logger import get_logger, LOG_PATH
+from typing import TYPE_CHECKING, Optional
+
+from app_info import (
+    APP_AUTHOR,
+    APP_NAME,
+    APP_REPO_URL,
+    APP_SUPPORT_EMAIL,
+    APP_VERSION_DISPLAY,
+    DEFAULT_ASSET_KEY,
+    DEFAULT_SPOTIFY_REDIRECT_URI,
+    EMBEDDED_CLIENT_ID,
+    PLACEHOLDER_CLIENT_ID,
+)
+from logger import LOG_PATH, get_logger
+
+if TYPE_CHECKING:
+    from PIL import Image
 
 log = get_logger("erp.main")
 
 _ICON_NAME = "Apple_Music_Icon.png"
+_OWN_CONSOLE_ENV = "ETERNALRP_OWN_CONSOLE"
 
 
-def _create_default_config():
+def _create_default_config() -> None:
     """Write a starter config.py next to the exe/script if one doesn't exist."""
     cfg_path = os.path.join(_app_dir, "config.py")
     if os.path.isfile(cfg_path):
         return
     try:
+        cid = EMBEDDED_CLIENT_ID or PLACEHOLDER_CLIENT_ID
         with open(cfg_path, "w", encoding="utf-8") as f:
             f.write(
-                '# Paste your Discord application Client ID below.\n'
-                'CLIENT_ID = "YOUR_DISCORD_CLIENT_ID"\n'
+                '# Discord application Client ID (uses built-in if set).\n'
+                f'CLIENT_ID = "{cid}"\n'
                 '\n'
-                'ASSET_KEY = "apple_music"\n'
+                f'ASSET_KEY = "{DEFAULT_ASSET_KEY}"\n'
                 '\n'
                 '# Optional: Spotify credentials (leave empty to disable).\n'
                 'SPOTIFY_CLIENT_ID = ""\n'
                 'SPOTIFY_CLIENT_SECRET = ""\n'
-                'SPOTIFY_REDIRECT_URI = "http://localhost:8888/callback"\n'
+                f'SPOTIFY_REDIRECT_URI = "{DEFAULT_SPOTIFY_REDIRECT_URI}"\n'
+                '\n'
+                '# Privacy: auto-accept Discord "Listen Along" join requests.\n'
+                '# Set to False to ignore join requests from people who click Join.\n'
+                'AUTO_ACCEPT_JOIN_REQUESTS = True\n'
+                '\n'
+                '# Privacy: upload album art to a public host so Discord can show it.\n'
+                '# Set to False to use the static app icon instead.\n'
+                'COVER_ART_UPLOAD = True\n'
             )
         log.info("Created default config.py at %s", cfg_path)
     except Exception as e:
         log.error("Failed to create config.py: %s", e)
 
 
-def _msgbox(text: str, title: str = "EternalRichPresence", info: bool = False):
+def _msgbox(text: str, title: str = APP_NAME, info: bool = False) -> None:
     """Show a native Windows message box (works even with --noconsole)."""
     if info:
         log.info("MSGBOX: %s", text)
@@ -74,7 +102,7 @@ def _msgbox(text: str, title: str = "EternalRichPresence", info: bool = False):
         log.warning("MessageBox failed: %s", e)
 
 
-def _icon_path():
+def _icon_path() -> Optional[str]:
     """Resolve the tray icon image, checking PyInstaller bundle first."""
     if getattr(sys, "frozen", False):
         meipass = os.path.join(getattr(sys, "_MEIPASS", ""), _ICON_NAME)
@@ -91,7 +119,7 @@ def _icon_path():
     return None
 
 
-def _load_tray_icon():
+def _load_tray_icon() -> "Image.Image":
     from PIL import Image
     path = _icon_path()
     if path:
@@ -102,33 +130,121 @@ def _load_tray_icon():
     return Image.new("RGB", (64, 64), (252, 60, 68))
 
 
+def _open_apple_music_search(track_name: str, artist_name: str) -> bool:
+    search_query = f"{track_name} {artist_name}".strip()
+    if not search_query or search_query == "Unknown Track":
+        return False
+
+    search_url = (
+        "https://music.apple.com/search?term="
+        + urllib.parse.quote(search_query, safe="")
+    )
+    try:
+        opened = webbrowser.open(search_url)
+        if opened:
+            log.info("Opened Apple Music search fallback: %s", search_url)
+        else:
+            log.warning("Browser declined Apple Music fallback URL: %s", search_url)
+        return bool(opened)
+    except Exception as e:
+        log.warning("Could not open browser for Apple Music search: %s — use: %s", e, search_url)
+        return False
+
+
+def _restart_self() -> None:
+    if getattr(sys, "frozen", False):
+        args = [sys.executable]
+    else:
+        args = [sys.executable, os.path.abspath(__file__)]
+    subprocess.Popen(args, close_fds=True)
+
+
+def _config_path() -> str:
+    return os.path.join(_app_dir, "config.py")
+
+
+def _open_path(path: str) -> None:
+    os.startfile(path)
+
+
+def _print_debug_paths() -> None:
+    print(f"app_dir={_app_dir}")
+    print(f"config={_config_path()}")
+    print(f"log={LOG_PATH}")
+
+
+def _should_spawn_new_console(args: list[str]) -> bool:
+    """When launched from `python main.py`, move into a dedicated console window."""
+    if os.name != "nt" or getattr(sys, "frozen", False):
+        return False
+    if os.environ.get(_OWN_CONSOLE_ENV) == "1":
+        return False
+    return not args
+
+
+def _spawn_in_new_console(args: list[str]) -> int:
+    env = os.environ.copy()
+    env[_OWN_CONSOLE_ENV] = "1"
+    subprocess.Popen(
+        [sys.executable, os.path.abspath(__file__), *args],
+        cwd=_app_dir,
+        env=env,
+        creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0x00000010),
+        close_fds=False,
+    )
+    return 0
+
+
+def _config_bool(name: str, default: bool = True) -> bool:
+    """Read a boolean setting from config.py, returning ``default`` if unset."""
+    try:
+        import config
+        return bool(getattr(config, name, default))
+    except Exception:
+        return default
+
+
+def _build_spotify_provider():
+    """Construct a SpotifyProvider from config, or None if unconfigured.
+
+    Shared by host mode and listener mode so the Spotify bootstrap (creds,
+    redirect default, provider construction) lives in exactly one place.
+    """
+    try:
+        from config import SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET
+    except ImportError:
+        return None
+    if not (SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET):
+        return None
+    try:
+        from config import SPOTIFY_REDIRECT_URI
+    except ImportError:
+        SPOTIFY_REDIRECT_URI = DEFAULT_SPOTIFY_REDIRECT_URI
+    redirect = SPOTIFY_REDIRECT_URI or DEFAULT_SPOTIFY_REDIRECT_URI
+    from providers.spotify import SpotifyProvider
+    return SpotifyProvider(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, redirect)
+
+
 def run_listener_mode(uri: str) -> int:
     """
     Parse an eternalrp:// URI and attempt to start playback on the listener's
     device. Tries Spotify first (if configured), then opens an Apple Music search.
     """
-    track_name = "Unknown Track"
-    artist_name = ""
-    position_sec = 0
+    from utils import parse_join_secret
 
-    if uri.startswith("eternalrp://"):
-        rest = uri[len("eternalrp://"):]
-        if "?" in rest:
-            _, qs = rest.split("?", 1)
-            params = urllib.parse.parse_qs(qs)
-            if "track" in params and params["track"]:
-                track_name = urllib.parse.unquote(params["track"][0])
-            if "artist" in params and params["artist"]:
-                artist_name = urllib.parse.unquote(params["artist"][0])
-            if "pos" in params and params["pos"]:
-                try:
-                    position_sec = int(params["pos"][0])
-                except (ValueError, TypeError):
-                    position_sec = 0
-        else:
-            track_name = urllib.parse.unquote(
-                rest.replace("/", "").strip() or "Unknown Track"
-            )
+    parsed, error = parse_join_secret(uri)
+    if error:
+        _msgbox(
+            "This Listen Along link is invalid or incomplete.\n\n"
+            "Ask your friend to copy a fresh link and try again.",
+            "Listen Along",
+            info=True,
+        )
+        return 1
+
+    track_name = parsed["track"]
+    artist_name = parsed["artist"]
+    position_sec = parsed["position_sec"]
 
     display = f"{track_name} by {artist_name}" if artist_name else track_name
     log.info("[SYNC] Attempting to join %s at %ds", display, position_sec)
@@ -136,19 +252,14 @@ def run_listener_mode(uri: str) -> int:
     position_ms = position_sec * 1000
 
     try:
-        from config import SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET
-        if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
-            from providers.spotify import SpotifyProvider
-            try:
-                from config import SPOTIFY_REDIRECT_URI
-            except ImportError:
-                SPOTIFY_REDIRECT_URI = "http://localhost:8888/callback"
-            redirect = SPOTIFY_REDIRECT_URI or "http://localhost:8888/callback"
-            sp = SpotifyProvider(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, redirect)
+        sp = _build_spotify_provider()
+        if sp is not None:
             if sp.search_and_play(track_name, artist_name, position_ms=position_ms):
                 log.info("Playback started on Spotify: %s at %ds", display, position_sec)
                 return 0
             err = sp.last_error or ""
+            # Transient Spotify states (no active device / server error) tell the
+            # user to retry Spotify, so don't also open an Apple Music search.
             if err == "no_active_device":
                 _msgbox(
                     "Spotify is open but idle.\n\n"
@@ -157,6 +268,15 @@ def run_listener_mode(uri: str) -> int:
                     "Listen Along — No Active Device",
                     info=True,
                 )
+                return 1
+            elif err == "server_error":
+                _msgbox(
+                    "Spotify's servers are temporarily unavailable.\n"
+                    "Please try again in a moment.",
+                    "Listen Along — Spotify Error",
+                    info=True,
+                )
+                return 1
             elif err == "premium_required":
                 _msgbox(
                     "Listen Along requires a Spotify Premium account\n"
@@ -165,11 +285,18 @@ def run_listener_mode(uri: str) -> int:
                     "Listen Along — Premium Required",
                     info=True,
                 )
-            elif err == "server_error":
+            elif err == "no_match":
                 _msgbox(
-                    "Spotify's servers are temporarily unavailable.\n"
-                    "Please try again in a moment.",
-                    "Listen Along — Spotify Error",
+                    "We couldn't find the exact Spotify track for this invite.\n\n"
+                    "Opening an Apple Music search instead.",
+                    "Listen Along — Track Not Found",
+                    info=True,
+                )
+            elif err == "init_failed":
+                _msgbox(
+                    "Spotify isn't ready on this device yet.\n\n"
+                    "Opening an Apple Music search instead.",
+                    "Listen Along — Spotify Setup Needed",
                     info=True,
                 )
             else:
@@ -178,35 +305,43 @@ def run_listener_mode(uri: str) -> int:
     except Exception as e:
         log.warning("Spotify sync unavailable (falling back to Apple Music): %s", e, exc_info=True)
 
-    search_query = f"{track_name} {artist_name}".strip()
-    if search_query and search_query != "Unknown Track":
-        search_url = (
-            "https://music.apple.com/search?term="
-            + urllib.parse.quote(search_query, safe="")
-        )
-        try:
-            import webbrowser
-            webbrowser.open(search_url)
-            log.info("Opened Apple Music search fallback: %s", search_url)
-        except Exception as e:
-            log.warning("Could not open browser for Apple Music search: %s — use: %s", e, search_url)
+    if _open_apple_music_search(track_name, artist_name):
+        return 0
 
-    return 0
+    _msgbox(
+        "We couldn't start playback automatically.\n\n"
+        f"Search for this track manually:\n{display}",
+        "Listen Along",
+        info=True,
+    )
+    return 1
 
 
 def run_host_mode() -> int:
     """
     Poll music providers, update Discord Rich Presence, and sit in the system
-    tray until the user exits.  Priority: Apple Music > Spotify.
+    tray until the user exits.
     """
     log.info("Starting host mode")
 
-    # --- validate / create config first ---
-    needs_setup = False
+    setup_completed = False
+    cfg_path = _config_path()
+
+    # Zero-config first run: if we ship an embedded Client ID and no config
+    # exists yet, write one so the setup GUI can be skipped.
+    if EMBEDDED_CLIENT_ID and not os.path.isfile(cfg_path):
+        _create_default_config()
+        if "config" in sys.modules:
+            import importlib
+            importlib.reload(sys.modules["config"])
+        log.info("Created config with embedded Discord Client ID")
+
+    # Resolve and validate CLIENT_ID on a live path: a missing config, or one
+    # still holding the placeholder, must trigger the setup GUI. (Previously this
+    # check was unreachable, so a placeholder config silently failed to connect.)
     try:
         from config import CLIENT_ID
-        if not CLIENT_ID or CLIENT_ID == "YOUR_DISCORD_CLIENT_ID":
-            needs_setup = True
+        needs_setup = not CLIENT_ID or CLIENT_ID == PLACEHOLDER_CLIENT_ID
     except ImportError:
         needs_setup = True
 
@@ -217,11 +352,12 @@ def run_host_mode() -> int:
             if not run_setup_gui():
                 log.info("Setup cancelled by user")
                 return 1
+            setup_completed = True
             import importlib
             if "config" in sys.modules:
                 importlib.reload(sys.modules["config"])
             from config import CLIENT_ID
-            if not CLIENT_ID or CLIENT_ID == "YOUR_DISCORD_CLIENT_ID":
+            if not CLIENT_ID or CLIENT_ID == PLACEHOLDER_CLIENT_ID:
                 _msgbox("Discord Client ID is still not set. Please try again.")
                 return 1
         except Exception as e:
@@ -235,51 +371,52 @@ def run_host_mode() -> int:
             )
             return 1
 
-    # --- load providers ---
-    try:
-        from providers.apple_music import AppleMusicProvider
-    except Exception as e:
-        log.exception("Failed to load Apple Music provider")
-        _msgbox(f"Failed to load Apple Music provider:\n{e}")
-        return 1
-
     from manager import ProviderManager
 
-    provider_list = [AppleMusicProvider()]
+    provider_list = []
 
     try:
-        from config import SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET
-        if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
-            from providers.spotify import SpotifyProvider
-            try:
-                from config import SPOTIFY_REDIRECT_URI
-            except ImportError:
-                SPOTIFY_REDIRECT_URI = ""
-            redirect = SPOTIFY_REDIRECT_URI or "http://localhost:8888/callback"
-            provider_list.append(
-                SpotifyProvider(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, redirect)
-            )
+        spotify_provider = _build_spotify_provider()
+        if spotify_provider is not None:
+            provider_list.append(spotify_provider)
             log.info("Spotify provider loaded")
-    except (ImportError, Exception):
-        log.debug("Spotify provider not loaded", exc_info=True)
+    except Exception:
+        log.warning("Spotify provider not loaded", exc_info=True)
+
+    try:
+        from providers.apple_music import AppleMusicProvider
+        provider_list.append(AppleMusicProvider())
+        log.info("Apple Music provider loaded")
+    except Exception:
+        log.warning("Apple Music provider not loaded", exc_info=True)
+
+    if not provider_list:
+        _msgbox(
+            "EternalRichPresence couldn't start either music provider.\n\n"
+            "Open the setup window or reinstall the app and try again."
+        )
+        return 1
 
     mgr = ProviderManager(provider_list)
 
     try:
         from config import ASSET_KEY
     except ImportError:
-        ASSET_KEY = "apple_music"
+        ASSET_KEY = DEFAULT_ASSET_KEY
 
-    from presence import DiscordPresence
+    from presence import DiscordConnectionError, DiscordPresence
 
-    dp = DiscordPresence(CLIENT_ID, asset_key=(ASSET_KEY or "apple_music").strip())
+    dp = DiscordPresence(
+        CLIENT_ID,
+        asset_key=(ASSET_KEY or DEFAULT_ASSET_KEY).strip(),
+        cover_upload=_config_bool("COVER_ART_UPLOAD", True),
+    )
 
     def _cleanup():
         dp.disconnect()
 
     atexit.register(_cleanup)
 
-    # --- Discord event listener (receives ACTIVITY_JOIN from Discord) ---
     evt_listener = None
     try:
         from discord_events import DiscordEventListener
@@ -292,16 +429,35 @@ def run_host_mode() -> int:
                 daemon=True,
             ).start()
 
-        evt_listener = DiscordEventListener(CLIENT_ID, _on_join_event)
+        evt_listener = DiscordEventListener(
+            CLIENT_ID, _on_join_event,
+            auto_accept=_config_bool("AUTO_ACCEPT_JOIN_REQUESTS", True),
+        )
         evt_listener.start()
         log.info("Discord event listener started")
     except Exception as e:
         log.warning("Discord event listener failed to start: %s", e)
 
-    # --- background poll loop ---
     stop_event = threading.Event()
     paused = threading.Event()
     interval = 5
+    tray = None
+
+    def _refresh_tray_title(current_track=None):
+        if tray is None:
+            return
+        if paused.is_set():
+            tip = f"{APP_NAME} | Paused"
+        elif current_track:
+            src = mgr.active_provider.name if mgr.active_provider else "Music"
+            tip = f"{APP_NAME} | {src}\n{current_track.title} — {current_track.artist}"
+        elif mgr.state == "paused":
+            tip = f"{APP_NAME} | Playback paused"
+        elif mgr.state == "error":
+            tip = f"{APP_NAME} | {mgr.status_detail}"
+        else:
+            tip = f"{APP_NAME} | Idle"
+        tray.title = tip[:127]
 
     def _poll_loop():
         while not stop_event.is_set():
@@ -314,30 +470,22 @@ def run_host_mode() -> int:
                         except Exception as e:
                             log.debug("Discord RPC connect retry failed: %s", e)
 
+                    t = mgr.get_now_playing()
                     if dp._rpc is not None:
-                        t = mgr.get_now_playing()
                         if t is None:
                             dp.clear()
                         else:
                             name = mgr.active_provider.name if mgr.active_provider else ""
                             dp.update(t, name)
-                        if tray:
-                            if t:
-                                src = mgr.active_provider.name if mgr.active_provider else "?"
-                                tip = f"EternalRichPresence | {src}\n{t.title} — {t.artist}"
-                            else:
-                                tip = "EternalRichPresence | Idle"
-                            tray.title = tip[:127]
+                    _refresh_tray_title(t)
+                except DiscordConnectionError as e:
+                    log.warning("Discord connection dropped, retrying: %s", e)
                 except Exception as e:
-                    dp._rpc = None
-                    log.warning("Poll error (will retry): %s", e)
+                    log.warning("Poll error (will retry): %s", e, exc_info=True)
             stop_event.wait(interval)
 
     poll_thread = threading.Thread(target=_poll_loop, daemon=True)
     poll_thread.start()
-
-    # --- system tray ---
-    tray = None
 
     import signal
 
@@ -356,10 +504,25 @@ def run_host_mode() -> int:
 
         icon_image = _load_tray_icon()
 
+        def _status_label(_item):
+            if paused.is_set():
+                return "Status: Paused"
+            if mgr.state == "error":
+                return "Status: Needs attention"
+            if mgr.state == "paused":
+                return "Status: Playback paused"
+            if mgr.state == "playing":
+                return "Status: Live"
+            return "Status: Waiting for music"
+
         def _now_playing_label(_item):
             t = dp.current_track
             if paused.is_set():
                 return "Paused"
+            if mgr.state == "error":
+                return mgr.status_detail
+            if mgr.state == "paused":
+                return "Playback paused"
             if t is None:
                 return "No track playing"
             label = t.title
@@ -374,6 +537,9 @@ def run_host_mode() -> int:
         def _discord_status_label(_item):
             return "Discord: Connected" if dp._rpc is not None else "Discord: Disconnected"
 
+        def _details_label(_item):
+            return mgr.status_detail
+
         def on_toggle(_icon, _item):
             if paused.is_set():
                 paused.clear()
@@ -382,6 +548,7 @@ def run_host_mode() -> int:
                 paused.set()
                 dp.clear()
                 log.info("Paused")
+            _refresh_tray_title()
 
         def on_reconnect(_icon, _item):
             log.info("Manual reconnect requested")
@@ -393,7 +560,11 @@ def run_host_mode() -> int:
                 log.info("Reconnected to Discord RPC")
             except Exception as e:
                 log.error("Reconnect failed: %s", e)
-                _msgbox(f"Reconnect failed:\n{e}")
+                _msgbox(
+                    "Discord couldn't be reached right now.\n\n"
+                    "Make sure Discord is open, then try again.",
+                    "Reconnect to Discord",
+                )
 
         def on_open_log(_icon, _item):
             log.info("Opening log file: %s", LOG_PATH)
@@ -403,9 +574,76 @@ def run_host_mode() -> int:
                 log.warning("Could not open log file: %s", e)
                 _msgbox(f"Log file:\n{LOG_PATH}")
 
+        def on_open_setup(_icon, _item):
+            try:
+                from setup_gui import run_setup_gui
+
+                if run_setup_gui():
+                    _msgbox(
+                        "Your settings were saved.\n\n"
+                        "EternalRichPresence will restart now so everything refreshes cleanly.",
+                        "Settings Saved",
+                        info=True,
+                    )
+                    _restart_self()
+                    stop_event.set()
+                    _icon.stop()
+            except Exception as e:
+                log.error("Could not open setup window: %s", e, exc_info=True)
+                _msgbox(
+                    "The setup window couldn't be opened.\n\n"
+                    f"Check the log file for details:\n{LOG_PATH}"
+                )
+
+        def on_open_config(_icon, _item):
+            try:
+                if not os.path.isfile(_config_path()):
+                    _create_default_config()
+                _open_path(_config_path())
+            except Exception as e:
+                log.error("Could not open config file: %s", e, exc_info=True)
+                _msgbox(
+                    "The config file couldn't be opened.\n\n"
+                    f"Path:\n{_config_path()}"
+                )
+
+        def on_open_app_folder(_icon, _item):
+            try:
+                _open_path(_app_dir)
+            except Exception as e:
+                log.error("Could not open app folder: %s", e, exc_info=True)
+                _msgbox(
+                    "The app folder couldn't be opened.\n\n"
+                    f"Path:\n{_app_dir}"
+                )
+
+        def on_repair_listen_along(_icon, _item):
+            try:
+                from utils import register_discord_launch, register_uri_scheme
+
+                ok_uri = register_uri_scheme()
+                ok_discord = register_discord_launch(CLIENT_ID)
+                if ok_uri and ok_discord:
+                    _msgbox(
+                        "Listen Along links are ready for this Windows account.",
+                        "Repair Listen Along",
+                        info=True,
+                    )
+                else:
+                    _msgbox(
+                        "Some link handlers could not be refreshed.\n\n"
+                        "Open Dev > Open Log File for details.",
+                        "Repair Listen Along",
+                    )
+            except Exception as e:
+                log.error("Listen Along repair failed: %s", e, exc_info=True)
+                _msgbox(
+                    "Listen Along repair failed.\n\n"
+                    f"Check the log file for details:\n{LOG_PATH}"
+                )
+
         def on_copy_log_path(_icon, _item):
             try:
-                import subprocess
                 subprocess.run(
                     ["clip"], input=LOG_PATH.encode(), check=True, creationflags=0x08000000
                 )
@@ -414,19 +652,28 @@ def run_host_mode() -> int:
                 log.warning("Clipboard copy failed: %s", e)
                 _msgbox(f"Log path:\n{LOG_PATH}")
 
+        def on_help(_icon, _item):
+            webbrowser.open(APP_REPO_URL)
+
+        def on_print_paths(_icon, _item):
+            log.info("App directory: %s", _app_dir)
+            log.info("Config path: %s", _config_path())
+            log.info("Log path: %s", LOG_PATH)
+            _print_debug_paths()
+
         def on_about(_icon, _item):
             _msgbox(
-                "EternalRichPresence  v1.0\n"
+                f"{APP_NAME}  v{APP_VERSION_DISPLAY}\n"
                 "━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                "Created by Ali Younes (@whoisaldo)\n\n"
+                f"Created by {APP_AUTHOR}\n\n"
                 "Discord Rich Presence bridge for\n"
                 "Apple Music and Spotify — with live\n"
                 "cover art and Listen Along.\n\n"
                 "Official repo:\n"
                 "github.com/whoisaldo/Eternal-Rich-Presence\n\n"
-                "Contact: Aliyounes@eternalreverse.com\n\n"
+                f"Contact: {APP_SUPPORT_EMAIL}\n\n"
                 "© 2026 Ali Younes. All rights reserved.",
-                "About EternalRichPresence",
+                f"About {APP_NAME}",
                 info=True,
             )
 
@@ -440,11 +687,10 @@ def run_host_mode() -> int:
             t = dp.current_track
             if t is None:
                 return None
-            import urllib.parse as _up
             pos = int(t.position_sec) if t.position_sec is not None else 0
-            safe_t = _up.quote(t.title[:80], safe="")
-            safe_a = _up.quote(t.artist[:40], safe="")
-            return f"eternalrp://sync?track={safe_t}&artist={safe_a}&pos={pos}"
+            from utils import build_join_secret
+
+            return build_join_secret(t.title, t.artist, pos)
 
         def on_copy_listen_link(_icon, _item):
             link = _build_listen_link()
@@ -457,7 +703,6 @@ def run_host_mode() -> int:
                 )
                 return
             try:
-                import subprocess
                 subprocess.run(
                     ["clip"], input=link.encode(), check=True, creationflags=0x08000000
                 )
@@ -473,11 +718,19 @@ def run_host_mode() -> int:
                 return
             log.info("[DEBUG] Current join_secret: %s", link)
 
-        debug_menu = pystray.Menu(
+        dev_menu = pystray.Menu(
             pystray.MenuItem(_discord_status_label, lambda: None, enabled=False),
+            pystray.MenuItem(_details_label, lambda: None, enabled=False),
             pystray.MenuItem(
-                lambda _item: f"Log: {os.path.basename(LOG_PATH)}", lambda: None, enabled=False
+                lambda _item: f"Log: {os.path.basename(LOG_PATH)}",
+                lambda: None,
+                enabled=False,
             ),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Open Setup", on_open_setup),
+            pystray.MenuItem("Open Config File", on_open_config),
+            pystray.MenuItem("Open App Folder", on_open_app_folder),
+            pystray.MenuItem("Print Paths To Console", on_print_paths),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Log Join Secret", on_log_join_secret),
             pystray.MenuItem("Open Log File", on_open_log),
@@ -485,26 +738,38 @@ def run_host_mode() -> int:
         )
 
         menu = pystray.Menu(
-            pystray.MenuItem("About EternalRichPresence", on_about),
+            pystray.MenuItem(f"About {APP_NAME}", on_about),
             pystray.Menu.SEPARATOR,
+            pystray.MenuItem(_status_label, lambda: None, enabled=False),
             pystray.MenuItem(_now_playing_label, lambda: None, enabled=False),
             pystray.MenuItem(_provider_label, lambda: None, enabled=False),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Copy Listen Along Link", on_copy_listen_link),
+            pystray.MenuItem("Repair Listen Along", on_repair_listen_along),
             pystray.MenuItem(
                 lambda _item: "Resume" if paused.is_set() else "Pause",
                 on_toggle,
             ),
             pystray.MenuItem("Reconnect to Discord", on_reconnect),
-            pystray.MenuItem("Debug", debug_menu),
+            pystray.MenuItem("Help", on_help),
+            pystray.MenuItem("Dev", dev_menu),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Exit", on_exit),
         )
 
         tray = pystray.Icon(
-            "EternalRichPresence", icon_image, "EternalRichPresence", menu
+            APP_NAME, icon_image, APP_NAME, menu
         )
         log.info("System tray started")
+        _refresh_tray_title()
+        if setup_completed:
+            _msgbox(
+                "Setup is complete.\n\n"
+                "EternalRichPresence is now running in your system tray.\n"
+                "Right-click the tray icon any time for controls or troubleshooting.",
+                "Setup Complete",
+                info=True,
+            )
         tray.run()
     except Exception as e:
         log.exception("System tray failed")
@@ -537,7 +802,7 @@ def _clear_presence() -> int:
     except ImportError:
         _msgbox("config.py with CLIENT_ID required.")
         return 1
-    if not CLIENT_ID or CLIENT_ID == "YOUR_DISCORD_CLIENT_ID":
+    if not CLIENT_ID or CLIENT_ID == PLACEHOLDER_CLIENT_ID:
         _msgbox("Set CLIENT_ID in config.py.")
         return 1
     try:
@@ -590,43 +855,65 @@ _BANNER = r"""
 """
 
 
-def main():
+def main() -> int:
     if not getattr(sys, "frozen", False):
         print(_BANNER)
-    log.info("EternalRichPresence starting (frozen=%s, dir=%s)", getattr(sys, "frozen", False), _app_dir)
+    log.info("%s starting (frozen=%s, dir=%s)", APP_NAME, getattr(sys, "frozen", False), _app_dir)
     args = sys.argv[1:]
+
+    if _should_spawn_new_console(args):
+        log.info("Re-launching in a dedicated console window")
+        return _spawn_in_new_console(args)
 
     try:
         from utils import register_uri_scheme
         if register_uri_scheme(silent=True):
             log.info("eternalrp:// protocol registered successfully")
         else:
-            log.warning("eternalrp:// registration failed — Listen Along needs a one-time Admin run")
-            print("[!] eternalrp:// registration failed. Run as Administrator once to enable Listen Along.")
+            log.warning("eternalrp:// registration failed for the current Windows user")
     except Exception as e:
         log.warning("eternalrp:// registration error: %s", e)
-        print(f"[!] eternalrp:// registration error: {e}")
 
     try:
         from config import CLIENT_ID as _cid
-        if _cid and _cid != "YOUR_DISCORD_CLIENT_ID":
+        if _cid and _cid != PLACEHOLDER_CLIENT_ID:
             from utils import register_discord_launch
             if register_discord_launch(_cid, silent=True):
                 log.info("discord-%s:// protocol registered successfully", _cid)
             else:
                 log.warning("discord-%s:// registration failed", _cid)
-                print(f"[!] discord-{_cid}:// registration failed. Listen Along may not work.")
     except Exception as e:
         log.warning("Discord protocol registration error: %s", e)
-        print(f"[!] Discord protocol registration error: {e}")
 
     if "--register-uri" in args:
         from utils import register_uri_scheme as _reg
         ok = _reg()
-        msg = "URI scheme registered." if ok else "URI scheme registration failed (try Administrator)."
+        msg = (
+            "Listen Along link registration is ready for this Windows account."
+            if ok else
+            "Listen Along link registration failed."
+        )
         log.info(msg)
-        print(msg)
+        _msgbox(msg, "Listen Along Registration", info=ok)
         return 0 if ok else 1
+
+    if "--setup" in args:
+        from setup_gui import run_setup_gui
+        return 0 if run_setup_gui() else 1
+
+    if "--open-config" in args:
+        if not os.path.isfile(_config_path()):
+            _create_default_config()
+        _open_path(_config_path())
+        return 0
+
+    if "--open-log" in args:
+        _open_path(LOG_PATH)
+        return 0
+
+    if "--print-paths" in args:
+        _print_debug_paths()
+        return 0
 
     if "--clear" in args:
         return _clear_presence()
@@ -662,37 +949,10 @@ def _extract_discord_join(arg: str) -> str:
         return ""
 
 
-def _is_admin() -> bool:
-    try:
-        return ctypes.windll.shell32.IsUserAnAdmin() != 0
-    except Exception as e:
-        log.debug("IsUserAnAdmin failed: %s", e)
-        return False
-
-
-def _elevate():
-    """Re-launch the current process with UAC admin prompt."""
-    if getattr(sys, "frozen", False):
-        exe = sys.executable
-        params = " ".join(sys.argv[1:])
-    else:
-        exe = sys.executable
-        params = f'"{os.path.abspath(__file__)}" ' + " ".join(sys.argv[1:])
-    try:
-        ctypes.windll.shell32.ShellExecuteW(
-            None, "runas", exe, params.strip(), None, 1
-        )
-    except Exception as e:
-        log.error("UAC elevation failed: %s", e)
-
-
 if __name__ == "__main__":
-    if not _is_admin():
-        _elevate()
-        sys.exit(0)
     try:
         sys.exit(main())
     except Exception as _fatal:
         log.critical("Fatal crash", exc_info=True)
-        _msgbox(f"EternalRichPresence crashed:\n\n{_fatal}")
+        _msgbox(f"{APP_NAME} crashed:\n\n{_fatal}")
         sys.exit(1)

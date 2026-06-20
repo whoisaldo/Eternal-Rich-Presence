@@ -44,13 +44,9 @@ def _open_pipe() -> Optional[int]:
     """Connect to the first available Discord IPC pipe."""
     for i in range(10):
         path = f"\\\\.\\pipe\\discord-ipc-{i}"
-        try:
-            handle = _CreateFileW(
-                path, _GENERIC_RW, 0, None, _OPEN_EXISTING, 0, None
-            )
-        except OSError as e:
-            log.debug("Pipe %d unavailable: %s", i, e)
-            continue
+        # Raw ctypes call returns INVALID_HANDLE_VALUE on failure (it never
+        # raises OSError), so _is_valid_handle covers every failure mode.
+        handle = _CreateFileW(path, _GENERIC_RW, 0, None, _OPEN_EXISTING, 0, None)
         if _is_valid_handle(handle):
             log.debug("Connected to Discord pipe %d", i)
             return handle
@@ -64,10 +60,34 @@ def _write(handle: int, op: int, payload: dict):
     written = ctypes.wintypes.DWORD(0)
     if not _WriteFile(handle, buf, len(buf), ctypes.byref(written), None):
         raise _PipeBroken("WriteFile failed")
+    if written.value != len(buf):
+        raise _PipeBroken(f"Short write: expected {len(buf)}, sent {written.value}")
 
 
 class _PipeBroken(Exception):
     """Raised when the Discord IPC pipe is no longer readable."""
+
+
+def _read_exact(handle: int, n: int) -> bytes:
+    """Read exactly ``n`` bytes from the pipe, looping over partial reads.
+
+    A synchronous ReadFile on a byte-mode pipe may return fewer bytes than
+    requested, so a single read can't be assumed to deliver a whole frame.
+    Raises ``_PipeBroken`` on read failure or EOF (a 0-byte read).
+    """
+    chunks = bytearray()
+    remaining = n
+    while remaining > 0:
+        buf = ctypes.create_string_buffer(remaining)
+        read_n = ctypes.wintypes.DWORD(0)
+        if not _ReadFile(handle, buf, remaining, ctypes.byref(read_n), None):
+            raise _PipeBroken("ReadFile failed")
+        got = read_n.value
+        if got == 0:
+            raise _PipeBroken("Pipe closed (EOF)")
+        chunks += buf.raw[:got]
+        remaining -= got
+    return bytes(chunks)
 
 
 def _read(handle: int, timeout_ms: int = 5000) -> Optional[dict]:
@@ -94,33 +114,29 @@ def _read(handle: int, timeout_ms: int = 5000) -> Optional[dict]:
     else:
         return None
 
-    header_buf = ctypes.create_string_buffer(8)
-    read_n = ctypes.wintypes.DWORD(0)
-    if not _ReadFile(handle, header_buf, 8, ctypes.byref(read_n), None):
-        raise _PipeBroken("ReadFile header failed")
-    if read_n.value < 8:
-        raise _PipeBroken("Short header read")
-    op, length = struct.unpack("<II", header_buf.raw)
+    _op, length = struct.unpack("<II", _read_exact(handle, 8))
 
     if length > 1024 * 1024:
         raise _PipeBroken(f"Implausible frame length: {length}")
+    if length == 0:
+        return {}
 
-    body_buf = ctypes.create_string_buffer(length)
-    if not _ReadFile(handle, body_buf, length, ctypes.byref(read_n), None):
-        raise _PipeBroken("ReadFile body failed")
+    body = _read_exact(handle, length)
     try:
-        return json.loads(body_buf.raw[: read_n.value].decode("utf-8"))
+        return json.loads(body.decode("utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         log.warning("Invalid RPC frame JSON: %s", e)
-        raise _PipeBroken("Invalid JSON in RPC frame")
+        raise _PipeBroken("Invalid JSON in RPC frame") from e
 
 
 class DiscordEventListener:
     """Listens for ACTIVITY_JOIN events on a dedicated Discord IPC connection."""
 
-    def __init__(self, client_id: str, on_join: Callable[[str], None]):
+    def __init__(self, client_id: str, on_join: Callable[[str], None],
+                 auto_accept: bool = True):
         self._client_id = client_id
         self._on_join = on_join
+        self._auto_accept = auto_accept
         self._handle: Optional[int] = None
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
@@ -168,20 +184,25 @@ class DiscordEventListener:
         resp = _read(self._handle, timeout_ms=5000)
         if resp is None:
             raise ConnectionError("Handshake timeout")
+        if resp.get("evt") != "READY":
+            raise ConnectionError(f"Unexpected handshake response: {resp}")
         log.debug("Event listener handshake OK")
 
     def _subscribe(self):
-        _write(self._handle, 1, {
-            "cmd": "SUBSCRIBE", "evt": "ACTIVITY_JOIN",
-            "nonce": os.urandom(4).hex(),
-        })
-        _read(self._handle, timeout_ms=3000)
-
-        _write(self._handle, 1, {
-            "cmd": "SUBSCRIBE", "evt": "ACTIVITY_JOIN_REQUEST",
-            "nonce": os.urandom(4).hex(),
-        })
-        _read(self._handle, timeout_ms=3000)
+        for event_name in ("ACTIVITY_JOIN", "ACTIVITY_JOIN_REQUEST"):
+            nonce = os.urandom(4).hex()
+            _write(self._handle, 1, {
+                "cmd": "SUBSCRIBE",
+                "evt": event_name,
+                "nonce": nonce,
+            })
+            resp = _read(self._handle, timeout_ms=3000)
+            if resp is None:
+                raise ConnectionError(f"Timed out subscribing to {event_name}")
+            if resp.get("evt") == "ERROR":
+                raise ConnectionError(f"Discord rejected {event_name} subscription: {resp}")
+            if resp.get("nonce") != nonce:
+                raise ConnectionError(f"Mismatched subscribe response for {event_name}")
         log.debug("Subscribed to join events")
 
     def _event_loop(self):
@@ -209,6 +230,9 @@ class DiscordEventListener:
                 user = data.get("data", {}).get("user", {})
                 uid = user.get("id", "")
                 uname = user.get("username", "?")
+                if not self._auto_accept:
+                    log.info("Join request from %s ignored (auto-accept disabled)", uname)
+                    continue
                 log.info("Auto-accepting join from %s", uname)
                 if uid:
                     try:
