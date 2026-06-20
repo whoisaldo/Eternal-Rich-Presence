@@ -2,17 +2,43 @@
 
 **The official Discord Rich Presence bridge for Apple Music and Spotify, by Ali Younes ([@whoisaldo](https://github.com/whoisaldo)).**
 
-Displays your current track with live cover art and a Listen Along invite, all from a lightweight system tray app.
+EternalRichPresence is a lightweight Windows tray app that shows your current song on Discord with live cover art and a Listen Along link.
 
-**Requirements:** Windows 10+, Python 3.8+ (for building), or the prebuilt `.exe`.
+**Requirements:** Windows 10+, Discord desktop app, and either the prebuilt `.exe` or Python 3.9+ (developed and tested on 3.13) for source installs.
 
 ## Quick Start (prebuilt)
 
-Download the latest `EternalRichPresence.exe` from the [official repository](https://github.com/whoisaldo/Eternal-Rich-Presence) to ensure you have the latest authorized version.
+Download the latest `EternalRichPresence.exe` from the [official repository](https://github.com/whoisaldo/Eternal-Rich-Presence).
 
-1. Place `EternalRichPresence.exe` and `Apple_Music_Icon.png` in the same folder.
-2. Launch the exe — on first run it creates a `config.py` for you. Open it in Notepad and paste your Discord `CLIENT_ID`.
-3. Start playing a song in Apple Music or Spotify, then launch again. It runs silently in the system tray.
+1. Launch the exe.
+2. The app is already configured for Discord.
+3. It drops into your system tray automatically.
+4. Start playing music in Apple Music or Spotify.
+5. Optional: use the `Dev` tray menu later if you want to add Spotify credentials or inspect logs.
+
+You do **not** need to run the app as Administrator for normal use. Listen Along protocol handlers are registered per user.
+
+## Setup Notes
+
+### Discord
+
+- Official releases already use the built-in EternalRichPresence Discord application.
+- End users do not need to create a Discord app or look up a Client ID.
+- If you are developing locally with your own Discord application, set `CLIENT_ID` in `config.py` instead.
+
+### Spotify (optional)
+
+- Spotify support improves playback detection and enables direct Listen Along playback.
+- Create an app in the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard).
+- Set the redirect URI to `http://localhost:8888/callback` unless you intentionally use a different one.
+- Remote playback requires Spotify Premium and an active Spotify device.
+
+### Privacy
+
+Two settings in `config.py` control what leaves your machine:
+
+- `AUTO_ACCEPT_JOIN_REQUESTS` (default `True`) — when someone clicks **Join** on your Rich Presence, the request is accepted automatically. Set to `False` to ignore join requests.
+- `COVER_ART_UPLOAD` (default `True`) — your current album art is uploaded to a public image host so Discord can display it. Set to `False` to show the static app icon instead and never upload artwork.
 
 ## Setup (from source)
 
@@ -20,68 +46,102 @@ Clone from the [official repository](https://github.com/whoisaldo/Eternal-Rich-P
 
 ```bash
 git clone https://github.com/whoisaldo/Eternal-Rich-Presence.git
-```
-
-1. Copy `config.example.py` to `config.py` and set `CLIENT_ID` (Developer Portal > your app > OAuth2).
-2. Add an Art Asset with key `apple_music` under Rich Presence > Art Assets (or change `ASSET_KEY`).
-3. *(Optional)* For Spotify, set `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` from the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard).
-4. Install dependencies:
-
-```
+cd Eternal-Rich-Presence
 pip install -r requirements.txt
-```
-
-5. Run:
-
-```bash
 python main.py
 ```
 
+On first run the app auto-creates `config.py` using the built-in Discord application and drops straight to the tray. The setup window only opens if the embedded Client ID has been removed (local development) or the config is incomplete. If that window can't open, copy `config.example.py` to `config.py` and fill it in manually.
+
+## Developer Shortcuts
+
+When launched with no arguments, `python main.py` opens in its own dedicated Windows console. For troubleshooting from your current terminal, use flags:
+
+```bash
+python main.py --setup
+python main.py --open-config
+python main.py --open-log
+python main.py --print-paths
+python main.py --clear
+python main.py --register-uri
+```
+
+These are intended for local debugging and support, while the normal release flow stays tray-first and simple for end users.
+
 ## Building the portable .exe
 
-Place an `Apple_Music_Icon.png` in the project root, then run:
+The project includes `Apple_Music_Icon.png` in the repo. Build with:
 
 ```powershell
 .\build.ps1
 ```
 
-This installs dependencies, compiles a single-file exe via PyInstaller with embedded version metadata, and cleans up build artifacts. The output is `EternalRichPresence.exe` in the project root.
+To create GitHub-release-ready artifacts as well:
+
+```powershell
+.\build.ps1 -ReleasePackage
+```
+
+This installs runtime dependencies plus PyInstaller, compiles a single-file exe with embedded version metadata, bundles the tray icon, and cleans up build artifacts. The output is `EternalRichPresence.exe` in the project root.
+
+With `-ReleasePackage`, the script also creates:
+
+- `release/EternalRichPresence-v<version>-windows.zip`
+- `release/EternalRichPresence-v<version>-windows-checksums.txt`
+- `release/EternalRichPresence-v<version>-windows-release-body.md`
+
+Upload the `.exe`, `.zip`, and checksums file to the GitHub release. The generated markdown file is ready to paste into the release description.
 
 ## System Tray
 
-When running in host mode the app sits in the Windows system tray:
+When running in host mode the app lives in the Windows system tray.
 
 | Menu Item | Action |
 |---|---|
-| About EternalRichPresence | Shows author and version info |
-| *Now Playing* | Current track and artist (read-only) |
-| *Source* | Active provider (read-only) |
-| Pause / Resume | Toggle presence on/off |
-| Reconnect to Discord | Re-establish the RPC connection |
-| Debug > | Discord status, open/copy log file |
+| About EternalRichPresence | Shows author, version, and support info |
+| Status / Now Playing / Source | Live read-only status labels |
+| Copy Listen Along Link | Copies the current join link |
+| Repair Listen Along | Re-registers the custom protocol handlers |
+| Pause / Resume | Temporarily disable or resume Rich Presence updates |
+| Reconnect to Discord | Re-establish the Discord RPC connection |
+| Help | Opens the project page |
+| Dev > | Setup, config, app folder, log tools, and advanced troubleshooting |
 | Exit | Disconnect and quit |
+
+## Behavior
+
+- **Provider handling:** Spotify is checked first when configured, then Apple Music. Paused playback is no longer shown as live activity.
+- **Cover art:** Your current album art is uploaded to a public image host so Discord can display it. The app prefers temporary hosts that expire after ~24 hours (`litterbox.catbox.moe`, then `0x0.st`) and only falls back to the permanent `catbox.moe` if both fail. Set `COVER_ART_UPLOAD = False` to disable uploads entirely.
+- **Listen Along:** Join links open Spotify playback when possible, then fall back to an Apple Music search if direct playback is unavailable. Incoming join requests are auto-accepted by default (`AUTO_ACCEPT_JOIN_REQUESTS`).
+- **Logging:** Logs are written to `eternalrp.log`. The app prefers the executable folder and falls back to a per-user writable location if needed.
+- **Protocol registration:** `eternalrp://` and `discord-{client_id}://` handlers are refreshed automatically for the current Windows user.
+
+## Troubleshooting
+
+- If the app seems to disappear after launch, check the Windows system tray overflow area.
+- If Listen Along does not work, use the tray menu and choose `Repair Listen Along`.
+- If Discord stops updating after Discord restarts, choose `Reconnect to Discord`.
+- If Spotify joins fail, confirm that Spotify is open, signed in, and has an active device. Premium is required for remote playback.
+- If you need support logs, open the tray menu and use `Dev > Open Log File`.
 
 ## Architecture
 
-```
-main.py              Entry point, CLI, system tray host
-presence.py          Discord RPC wrapper with dynamic cover art (catbox.moe)
-manager.py           Tries providers in priority order
-logger.py            Rotating file + console log (eternalrp.log)
+```text
+main.py              Entry point, setup flow, listener mode, system tray host
+app_info.py          App name/version/author constants, embedded Client ID, shared helpers
+presence.py          Discord RPC wrapper with reconnect-aware updates
+manager.py           Provider selection and playback state normalization
+discord_events.py    Raw Win32 named-pipe Discord IPC listener for ACTIVITY_JOIN
+setup_gui.py         First-run tkinter config window (writes config.py)
+logger.py            Rotating file + console log with writable fallback paths
 providers/
   base.py            BaseProvider interface + TrackInfo dataclass
-  apple_music.py     iTunes COM + Windows SMTC
+  apple_music.py     iTunes COM + Apple-only SMTC fallback
   spotify.py         Spotify Web API (spotipy + OAuth2)
-utils.py             URI scheme registration, cover art upload
+utils.py             URI registration, join-secret helpers, cover art upload
 config.py            User configuration (gitignored)
-build.ps1            One-click PyInstaller build script
+build.ps1            Portable PyInstaller build script
 ```
-
-- **Provider priority:** Apple Music is checked first; Spotify is the fallback.
-- **Cover art:** Extracted from SMTC / Spotify and uploaded to catbox.moe so Discord shows the actual album artwork.
-- **Listen Along:** Clicking Join on someone's profile launches `eternalrp://` which tries Spotify playback first, then falls back to an Apple Music web search.
-- **Auto-register:** The `eternalrp://` URI scheme is silently registered on every launch so deep links always point at the current executable.
-- **Logging:** All events are written to `eternalrp.log` (rotates at 2 MB, 3 backups). Open via the Debug tray menu.
 
 ## License
 
