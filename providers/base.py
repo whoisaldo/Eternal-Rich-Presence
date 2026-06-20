@@ -24,6 +24,8 @@ class BaseProvider(ABC):
 
     @abstractmethod
     def is_available(self) -> bool:
+        # Reserved extension point. Currently unused — ProviderManager drives
+        # provider selection entirely off get_now_playing().
         ...
 
     @abstractmethod
