@@ -1,0 +1,42 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build exe + publish release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build portable exe
+        # build.ps1 installs its own deps (requirements.txt + pyinstaller) and
+        # produces EternalRichPresence.exe at the repo root. Its flags are the
+        # source of truth for the exe and are intentionally not overridden here.
+        shell: pwsh
+        run: .\build.ps1
+      - name: Extract release notes from CHANGELOG.md
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          $out = @()
+          $capture = $false
+          foreach ($line in Get-Content CHANGELOG.md) {
+            if ($line -match "^##\s+\[$([regex]::Escape($version))\]") { $capture = $true; continue }
+            if ($capture -and $line -match "^##\s+\[") { break }
+            if ($capture) { $out += $line }
+          }
+          if (-not $out) { $out = @("Release ${{ github.ref_name }}") }
+          Set-Content -Path release_notes.md -Value $out -Encoding UTF8
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: EternalRichPresence.exe
+          body_path: release_notes.md

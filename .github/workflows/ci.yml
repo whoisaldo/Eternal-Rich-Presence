@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    branches: [dev, main]
+
+jobs:
+  lint-test:
+    name: Lint + tests (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install tooling (ruff + pytest only)
+        # Linux runner deliberately installs NO runtime deps: pywin32, winrt-*,
+        # pypresence and pystray are Windows-only and would not resolve here.
+        # The pure-logic tests import only stdlib + app_info/logger/utils.
+        run: python -m pip install --upgrade pip ruff==0.15.18 pytest
+      - name: Ruff lint
+        run: ruff check .
+      - name: Ruff format check
+        run: ruff format --check .
+      - name: Pytest
+        run: pytest -q
+
+  test-windows:
+    name: Tests (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install runtime deps + pytest
+        run: python -m pip install --upgrade pip pytest -r requirements.txt
+      - name: Pytest
+        run: pytest -q

@@ -1,5 +1,7 @@
 # EternalRichPresence
 
+[![CI](https://github.com/whoisaldo/Eternal-Rich-Presence/actions/workflows/ci.yml/badge.svg)](https://github.com/whoisaldo/Eternal-Rich-Presence/actions/workflows/ci.yml)
+
 **The official Discord Rich Presence bridge for Apple Music and Spotify, by Ali Younes ([@whoisaldo](https://github.com/whoisaldo)).**
 
 EternalRichPresence is a lightweight Windows tray app that shows your current song on Discord with live cover art and a Listen Along link.
