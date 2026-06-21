@@ -1,6 +1,7 @@
 # EternalRichPresence
 
 [![CI](https://github.com/whoisaldo/Eternal-Rich-Presence/actions/workflows/ci.yml/badge.svg)](https://github.com/whoisaldo/Eternal-Rich-Presence/actions/workflows/ci.yml)
+[![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
 
 **The official Discord Rich Presence bridge for Apple Music and Spotify, by Ali Younes ([@whoisaldo](https://github.com/whoisaldo)).**
 
@@ -145,10 +146,12 @@ config.py            User configuration (gitignored)
 build.ps1            Portable PyInstaller build script
 ```
 
-## License
+## License & Trademark
 
-EternalRichPresence is **source-available** under a custom license. You may use it freely for personal, non-commercial purposes. Redistribution of the source code or compiled binary, and creation of derivative works or competing versions for public distribution, are strictly prohibited. See [LICENSE](LICENSE) for full terms.
+EternalRichPresence is free software, licensed under the [GNU General Public License v3.0](LICENSE). You are free to use, study, share, and modify it. Redistributed forks and derivative works must also be licensed under GPL-3.0 and keep their source open — see [LICENSE](LICENSE) for the full terms.
 
-Copyright (c) 2026 Ali Younes ([@whoisaldo](https://github.com/whoisaldo))
+The **EternalRichPresence** and **Eternal Reverse** names and the project logo/branding are **not** covered by the GPL and remain the property of Ali Younes (@whoisaldo). Forks must use a different name and logo and must not imply endorsement — see [TRADEMARK.md](TRADEMARK.md).
+
+Copyright (C) 2026 Ali Younes ([@whoisaldo](https://github.com/whoisaldo))
 
 For support, licensing inquiries, or business contact: **Aliyounes@eternalreverse.com**
