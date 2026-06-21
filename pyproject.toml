@@ -1,0 +1,17 @@
+# Tooling configuration only — EternalRichPresence is distributed as a PyInstaller
+# exe (see build.ps1), not as an installable package.
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# main.py inserts the app dir onto sys.path before importing first-party modules
+# (required for frozen builds), so its module-level imports are deliberately not
+# at the very top of the file.
+"main.py" = ["E402"]
+
+[tool.ruff.format]
