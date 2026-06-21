@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Tooling configuration only — EternalRichPresence is distributed as a PyInstaller
 # exe (see build.ps1), not as an installable package.
 

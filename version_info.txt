@@ -21,7 +21,7 @@ VSVersionInfo(
             StringStruct(u'FileDescription', u'EternalRichPresence — Discord Rich Presence for Apple Music & Spotify'),
             StringStruct(u'FileVersion', u'2.0.0.0'),
             StringStruct(u'InternalName', u'EternalRichPresence'),
-            StringStruct(u'LegalCopyright', u'Copyright (c) 2026 Ali Younes (@whoisaldo). All rights reserved.'),
+            StringStruct(u'LegalCopyright', u'Copyright (C) 2026 Ali Younes (@whoisaldo). Licensed under GPL-3.0-or-later.'),
             StringStruct(u'OriginalFilename', u'EternalRichPresence.exe'),
             StringStruct(u'ProductName', u'EternalRichPresence'),
             StringStruct(u'ProductVersion', u'2.0.0.0'),

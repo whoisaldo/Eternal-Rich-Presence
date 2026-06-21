@@ -1,3 +1,11 @@
+# EternalRichPresence — Discord Rich Presence for Apple Music & Spotify
+# Copyright (C) 2026 Ali Younes (@whoisaldo)
+#
+# This program is free software: you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published by the
+# Free Software Foundation, either version 3 of the License, or (at your
+# option) any later version. See <https://www.gnu.org/licenses/> for details.
+
 """Central application metadata and small shared helpers.
 
 This module imports nothing from the rest of the project, so every other module
@@ -16,6 +24,7 @@ APP_VERSION_DISPLAY = "2.0"
 APP_AUTHOR = "Ali Younes (@whoisaldo)"
 APP_REPO_URL = "https://github.com/whoisaldo/Eternal-Rich-Presence"
 APP_SUPPORT_EMAIL = "Aliyounes@eternalreverse.com"
+APP_LICENSE = "GPL-3.0-or-later"
 
 DEFAULT_ASSET_KEY = "apple_music"
 
