@@ -7,7 +7,7 @@
 # option) any later version. See <https://www.gnu.org/licenses/> for details.
 
 import asyncio
-import sys
+import concurrent.futures
 import threading
 import time
 from datetime import datetime
@@ -18,31 +18,6 @@ from logger import get_logger
 from .base import BaseProvider, TrackInfo
 
 log = get_logger("erp.apple_music")
-
-# winrt on Python 3.13 fires "Event loop is closed" from a native callback
-# after asyncio.run() has already returned the data.  Suppress via every
-# hook Python exposes for unhandled/unraisable exceptions.
-_orig_threading_hook = threading.excepthook
-_orig_unraisable_hook = sys.unraisablehook
-
-
-def _quiet_threading_hook(args):
-    if args.exc_type is RuntimeError and "Event loop is closed" in str(args.exc_value):
-        return
-    _orig_threading_hook(args)
-
-
-def _quiet_unraisable_hook(unraisable):
-    if isinstance(unraisable.exc_value, RuntimeError) and "Event loop is closed" in str(
-        unraisable.exc_value
-    ):
-        return
-    _orig_unraisable_hook(unraisable)
-
-
-threading.excepthook = _quiet_threading_hook
-sys.unraisablehook = _quiet_unraisable_hook
-
 
 _WIN_EPOCH_OFFSET = 116444736000000000  # 100ns ticks between 1601-01-01 and 1970-01-01
 
@@ -95,8 +70,10 @@ class AppleMusicProvider(BaseProvider):
         self._itunes = None
         self._itunes_retry_at = 0.0
         self._com_initialized = False
-        self._smtc_thread = None
+        self._loop = None
+        self._loop_thread = None
         self._last_smtc = None
+        self._thumb_cache = (None, None)  # (track key, bytes)
 
     @property
     def name(self) -> str:
@@ -132,9 +109,6 @@ class AppleMusicProvider(BaseProvider):
             log.debug("iTunes COM not available (%s); re-probing later", e)
             self._itunes_retry_at = now + self._ITUNES_REPROBE_INTERVAL
             return None
-
-    def is_available(self) -> bool:
-        return self.get_now_playing() is not None
 
     def get_now_playing(self) -> Optional[TrackInfo]:
         # iTunes COM first (richer data for legacy users), SMTC otherwise. A
@@ -241,7 +215,15 @@ class AppleMusicProvider(BaseProvider):
                         except Exception as e:
                             log.debug("SMTC timeline/position: %s", e)
 
-                        thumbnail_bytes = await self._read_thumbnail(props)
+                        # Re-reading the (up to 2 MiB) thumbnail stream every
+                        # poll is wasted work while the track is unchanged.
+                        cache_key = (app_id, title, artist, album)
+                        if self._thumb_cache[0] == cache_key:
+                            thumbnail_bytes = self._thumb_cache[1]
+                        else:
+                            thumbnail_bytes = await self._read_thumbnail(props)
+                            if thumbnail_bytes is not None:
+                                self._thumb_cache = (cache_key, thumbnail_bytes)
 
                         track_info = TrackInfo(
                             title=title,
@@ -263,30 +245,39 @@ class AppleMusicProvider(BaseProvider):
                 log.debug("SMTC _fetch: %s", e)
                 return None
 
-        # Don't pile up stuck worker threads if a winrt call ever hangs past the
-        # join timeout: skip this poll while a prior fetch is still running, and
-        # fall back to the last known state instead of a spurious None.
-        if self._smtc_thread is not None and self._smtc_thread.is_alive():
-            log.debug("Previous SMTC fetch still running; skipping this poll")
-            return self._last_smtc
-
-        result = [None]
-
-        def _run_in_thread():
-            try:
-                result[0] = asyncio.run(_fetch())
-            except Exception as e:
-                log.debug("SMTC fetch error: %s", e)
-
-        t = threading.Thread(target=_run_in_thread, daemon=True)
-        self._smtc_thread = t
-        t.start()
-        t.join(timeout=5)
-        if t.is_alive():
+        # One persistent loop thread services every SMTC fetch. Building and
+        # tearing down an event loop per 5s poll was constant churn and made
+        # winrt's native callbacks fire "Event loop is closed" errors (which
+        # used to be papered over by monkeypatching the global exception
+        # hooks). A hung fetch just times out here and queues behind.
+        try:
+            loop = self._ensure_loop()
+        except Exception as e:
+            log.debug("SMTC loop unavailable: %s", e)
+            return None
+        future = asyncio.run_coroutine_threadsafe(_fetch(), loop)
+        try:
+            result = future.result(timeout=5)
+        except concurrent.futures.TimeoutError:
+            future.cancel()
             log.debug("SMTC fetch exceeded 5s; returning last known state")
             return self._last_smtc
-        self._last_smtc = result[0]
-        return result[0]
+        except Exception as e:
+            log.debug("SMTC fetch error: %s", e)
+            return None
+        self._last_smtc = result
+        return result
+
+    def _ensure_loop(self):
+        thread_alive = self._loop_thread is not None and self._loop_thread.is_alive()
+        if self._loop is not None and thread_alive:
+            return self._loop
+        self._loop = asyncio.new_event_loop()
+        self._loop_thread = threading.Thread(
+            target=self._loop.run_forever, daemon=True, name="smtc-loop"
+        )
+        self._loop_thread.start()
+        return self._loop
 
     @staticmethod
     async def _read_thumbnail(props) -> Optional[bytes]:
@@ -300,10 +291,16 @@ class AppleMusicProvider(BaseProvider):
                 from winrt.windows.storage.streams import Buffer, InputStreamOptions
 
                 stream = await thumb_ref.open_read_async()
-                buf = Buffer(2 * 1024 * 1024)
-                await stream.read_async(buf, buf.capacity, InputStreamOptions.READ_AHEAD)
-                n = getattr(buf, "length", buf.capacity)
-                return bytes(bytearray(buf)[:n])
+                try:
+                    buf = Buffer(2 * 1024 * 1024)
+                    await stream.read_async(buf, buf.capacity, InputStreamOptions.READ_AHEAD)
+                    n = getattr(buf, "length", buf.capacity)
+                    return bytes(bytearray(buf)[:n])
+                finally:
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
 
             return await asyncio.wait_for(_do_read(), timeout=3)
         except (asyncio.TimeoutError, asyncio.CancelledError) as e:

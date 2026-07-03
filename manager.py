@@ -24,7 +24,6 @@ class ProviderManager:
         self._active: Optional[BaseProvider] = None
         self._state = "idle"
         self._status_detail = "Waiting for music"
-        self._last_error: Optional[str] = None
         # Last playing track and when it was seen, for the one-cycle grace.
         self._last_playing: Optional[tuple[TrackInfo, float]] = None
         self._grace_used = False
@@ -41,19 +40,15 @@ class ProviderManager:
     def status_detail(self) -> str:
         return self._status_detail
 
-    @property
-    def last_error(self) -> Optional[str]:
-        return self._last_error
-
     def get_now_playing(self) -> Optional[TrackInfo]:
         paused_provider: Optional[BaseProvider] = None
-        provider_errors: list[tuple[str, str]] = []
+        failed_providers: list[str] = []
 
         for provider in self._providers:
             try:
                 track = provider.get_now_playing()
-            except Exception as e:
-                provider_errors.append((provider.name, str(e)))
+            except Exception:
+                failed_providers.append(provider.name)
                 log.warning(
                     "Provider %s failed while checking playback",
                     provider.name,
@@ -69,7 +64,6 @@ class ProviderManager:
                 self._active = provider
                 self._state = "playing"
                 self._status_detail = f"Playing from {provider.name}"
-                self._last_error = None
                 self._last_playing = (track, time.monotonic())
                 self._grace_used = False
                 return track
@@ -81,19 +75,15 @@ class ProviderManager:
             self._active = paused_provider
             self._state = "paused"
             self._status_detail = f"Playback is paused in {paused_provider.name}"
-            self._last_error = None
             return None
 
         self._active = None
-        if provider_errors:
-            provider_name, error_text = provider_errors[0]
+        if failed_providers:
             self._state = "error"
-            self._status_detail = f"{provider_name} is unavailable"
-            self._last_error = f"{provider_name}: {error_text}"
+            self._status_detail = f"{failed_providers[0]} is unavailable"
         else:
             self._state = "idle"
             self._status_detail = "Waiting for music"
-            self._last_error = None
         return None
 
     def _grace_track(self, provider: BaseProvider) -> Optional[TrackInfo]:

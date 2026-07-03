@@ -30,9 +30,6 @@ class FakeProvider(BaseProvider):
     def name(self):
         return self._name
 
-    def is_available(self):
-        return True
-
     def get_now_playing(self):
         item = self.script.pop(0)
         if isinstance(item, Exception):
@@ -82,7 +79,6 @@ def test_cold_error_reports_error_state():
     assert mgr.get_now_playing() is None
     assert mgr.state == "error"
     assert mgr.status_detail == "A is unavailable"
-    assert "boom" in mgr.last_error
 
 
 def test_transient_error_gets_one_cycle_grace():
