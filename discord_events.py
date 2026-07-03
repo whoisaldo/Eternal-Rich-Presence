@@ -145,6 +145,10 @@ class DiscordEventListener:
         self._on_join = on_join
         self._auto_accept = auto_accept
         self._handle: Optional[int] = None
+        # Serializes handle teardown between stop() (tray/main thread) and the
+        # worker's finally block — an unsynchronized double CloseHandle could
+        # close an unrelated handle if Windows reused the value in between.
+        self._handle_lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
 
@@ -155,12 +159,17 @@ class DiscordEventListener:
 
     def stop(self):
         self._stop.set()
-        if self._handle is not None:
+        self._close_handle()
+
+    def _close_handle(self):
+        with self._handle_lock:
+            handle, self._handle = self._handle, None
+            if handle is None:
+                return
             try:
-                _CloseHandle(self._handle)
+                _CloseHandle(handle)
             except Exception as e:
-                log.debug("CloseHandle on stop: %s", e)
-            self._handle = None
+                log.debug("CloseHandle: %s", e)
 
     def _run(self):
         while not self._stop.is_set():
@@ -177,12 +186,7 @@ class DiscordEventListener:
             except Exception as e:
                 log.warning("Event listener error (will retry): %s", e, exc_info=True)
             finally:
-                if self._handle is not None:
-                    try:
-                        _CloseHandle(self._handle)
-                    except Exception as e:
-                        log.debug("CloseHandle in finally: %s", e)
-                    self._handle = None
+                self._close_handle()
             if not self._stop.is_set():
                 self._stop.wait(5)
 
@@ -207,13 +211,22 @@ class DiscordEventListener:
                     "nonce": nonce,
                 },
             )
-            resp = _read(self._handle, timeout_ms=3000)
-            if resp is None:
-                raise ConnectionError(f"Timed out subscribing to {event_name}")
-            if resp.get("evt") == "ERROR":
-                raise ConnectionError(f"Discord rejected {event_name} subscription: {resp}")
-            if resp.get("nonce") != nonce:
-                raise ConnectionError(f"Mismatched subscribe response for {event_name}")
+            # Discord may interleave DISPATCH frames (real events) before the
+            # subscribe ack; treat them as events instead of a fatal mismatch.
+            for _ in range(5):
+                resp = _read(self._handle, timeout_ms=3000)
+                if resp is None:
+                    raise ConnectionError(f"Timed out subscribing to {event_name}")
+                if resp.get("evt") == "ERROR":
+                    raise ConnectionError(f"Discord rejected {event_name} subscription: {resp}")
+                if resp.get("cmd") == "DISPATCH":
+                    self._handle_event(resp)
+                    continue
+                if resp.get("nonce") == nonce:
+                    break
+                log.debug("Ignoring unrelated frame during subscribe: %s", resp.get("cmd"))
+            else:
+                raise ConnectionError(f"No subscribe ack for {event_name}")
         log.debug("Subscribed to join events")
 
     def _event_loop(self):
@@ -226,35 +239,37 @@ class DiscordEventListener:
 
             if data is None:
                 continue
+            self._handle_event(data)
 
-            evt = data.get("evt")
-            if evt == "ACTIVITY_JOIN":
-                secret = data.get("data", {}).get("secret", "")
-                log.info("ACTIVITY_JOIN received: %s", secret)
-                if secret:
-                    try:
-                        self._on_join(secret)
-                    except Exception as e:
-                        log.error("Join handler error: %s", e)
+    def _handle_event(self, data: dict):
+        evt = data.get("evt")
+        if evt == "ACTIVITY_JOIN":
+            secret = data.get("data", {}).get("secret", "")
+            log.info("ACTIVITY_JOIN received: %s", secret)
+            if secret:
+                try:
+                    self._on_join(secret)
+                except Exception as e:
+                    log.error("Join handler error: %s", e)
 
-            elif evt == "ACTIVITY_JOIN_REQUEST":
-                user = data.get("data", {}).get("user", {})
-                uid = user.get("id", "")
-                uname = user.get("username", "?")
-                if not self._auto_accept:
-                    log.info("Join request from %s ignored (auto-accept disabled)", uname)
-                    continue
-                log.info("Auto-accepting join from %s", uname)
-                if uid:
-                    try:
-                        _write(
-                            self._handle,
-                            1,
-                            {
-                                "cmd": "SEND_ACTIVITY_JOIN_INVITE",
-                                "args": {"user_id": uid},
-                                "nonce": os.urandom(4).hex(),
-                            },
-                        )
-                    except Exception as e:
-                        log.debug("SEND_ACTIVITY_JOIN_INVITE failed: %s", e)
+        elif evt == "ACTIVITY_JOIN_REQUEST":
+            user = data.get("data", {}).get("user", {})
+            uid = user.get("id", "")
+            uname = user.get("username", "?")
+            if not self._auto_accept:
+                log.info("Join request from %s ignored (auto-accept disabled)", uname)
+                return
+            log.info("Auto-accepting join from %s", uname)
+            if uid:
+                try:
+                    _write(
+                        self._handle,
+                        1,
+                        {
+                            "cmd": "SEND_ACTIVITY_JOIN_INVITE",
+                            "args": {"user_id": uid},
+                            "nonce": os.urandom(4).hex(),
+                        },
+                    )
+                except Exception as e:
+                    log.debug("SEND_ACTIVITY_JOIN_INVITE failed: %s", e)
