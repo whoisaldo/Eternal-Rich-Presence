@@ -129,11 +129,13 @@ class AppleMusicProvider(BaseProvider):
             if track is None:
                 return None
             state = int(getattr(self._itunes, "PlayerState", 0) or 0)
+            duration = int(getattr(track, "Duration", 0) or 0)
             return TrackInfo(
                 title=getattr(track, "Name", None) or "Unknown",
                 artist=getattr(track, "Artist", None) or "Unknown Artist",
                 album=getattr(track, "Album", None) or "",
                 position_sec=getattr(self._itunes, "PlayerPosition", 0) or 0,
+                duration_sec=duration or None,
                 is_playing=(state == 1),
             )
         except Exception as e:
@@ -200,6 +202,7 @@ class AppleMusicProvider(BaseProvider):
                         album = (getattr(props, "album_title", "") or "").strip()
 
                         pos_sec = None
+                        duration_sec = None
                         try:
                             timeline = s.get_timeline_properties()
                             if timeline:
@@ -212,6 +215,9 @@ class AppleMusicProvider(BaseProvider):
                                     if playback_status_value == _PLAYBACK_PLAYING:
                                         elapsed = _smtc_elapsed_since_update(timeline)
                                     pos_sec = int(raw_sec + elapsed)
+                                end = getattr(timeline, "end_time", None)
+                                if end is not None and hasattr(end, "total_seconds"):
+                                    duration_sec = int(end.total_seconds()) or None
                         except Exception as e:
                             log.debug("SMTC timeline/position: %s", e)
 
@@ -230,6 +236,7 @@ class AppleMusicProvider(BaseProvider):
                             artist=artist,
                             album=album,
                             position_sec=pos_sec,
+                            duration_sec=duration_sec,
                             cover_art=thumbnail_bytes,
                             is_playing=(playback_status_value == _PLAYBACK_PLAYING),
                         )

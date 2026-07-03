@@ -147,6 +147,7 @@ class SpotifyProvider(BaseProvider):
 
             progress_ms = current.get("progress_ms", 0) or 0
             pos_sec = progress_ms // 1000
+            duration_ms = item.get("duration_ms") or 0
 
             cover_art = self._fetch_cover(album_info)
             is_playing = bool(current.get("is_playing"))
@@ -156,6 +157,7 @@ class SpotifyProvider(BaseProvider):
                 artist=artist,
                 album=album,
                 position_sec=pos_sec,
+                duration_sec=(duration_ms // 1000) or None,
                 cover_art=cover_art,
                 is_playing=is_playing,
             )

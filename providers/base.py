@@ -19,6 +19,7 @@ class TrackInfo:
     artist: str = "Unknown Artist"
     album: str = ""
     position_sec: Optional[int] = None
+    duration_sec: Optional[int] = None
     cover_art: Optional[bytes] = None
     is_playing: bool = True
 

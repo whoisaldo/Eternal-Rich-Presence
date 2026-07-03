@@ -53,6 +53,12 @@ class DiscordPresence:
     _REFRESH_INTERVAL = 30
     _SEEK_THRESHOLD = 5
     _UPLOAD_RETRY_INTERVAL = 60
+    # litterbox/0x0 uploads expire after 24h; refresh comfortably before that
+    # so long sessions never hand Discord a dead image URL.
+    _COVER_URL_TTL = 23 * 3600
+    _COVER_CACHE_MAX = 32
+    # Discord activity type 2 renders "Listening to ..." with a progress bar.
+    _ACTIVITY_LISTENING = 2
 
     def __init__(
         self,
@@ -73,13 +79,19 @@ class DiscordPresence:
         # installation of the app look like the same Discord party.
         self._party_id = f"eternal-{uuid.uuid4().hex[:12]}"
         self._last_track_key: Optional[str] = None
-        self._last_cover_hash: Optional[str] = None
         self._last_cover_url_sent: Optional[str] = None
-        self._cached_cover_url: Optional[str] = None
-        self._cover_retry_at: float = 0.0
+        # sha1 -> (url, uploaded_at): alternating albums no longer re-upload
+        # identical art, and entries expire with the host's 24h URL lifetime.
+        self._cover_cache: dict = {}
+        self._cover_fail_at: dict = {}
         self._last_update_time: float = 0.0
         self._locked_start: Optional[int] = None
+        self._supports_activity_type = True
         self.current_track: Optional[TrackInfo] = None
+
+    def set_cover_upload(self, enabled: bool) -> None:
+        """Live-apply the COVER_ART_UPLOAD privacy toggle from the tray."""
+        self._cover_upload = bool(enabled)
 
     @property
     def is_connected(self) -> bool:
@@ -197,13 +209,28 @@ class DiscordPresence:
                 large_image=cover_url if cover_url else self._asset_key,
                 large_text=large_text,
             )
+            if self._supports_activity_type:
+                update_kw["activity_type"] = self._ACTIVITY_LISTENING
+            if locked_start is not None and track.duration_sec:
+                # With an end timestamp Discord shows a real progress bar.
+                update_kw["end"] = locked_start + int(track.duration_sec)
             # Discord only renders small_text when a small_image accompanies it.
             if provider_name and cover_url:
                 update_kw["small_image"] = self._asset_key
                 update_kw["small_text"] = provider_name
 
             try:
-                self._rpc.update(**update_kw)
+                try:
+                    self._rpc.update(**update_kw)
+                except TypeError:
+                    # Installed pypresence predates activity_type support;
+                    # degrade to the classic "Playing" card once, permanently.
+                    if "activity_type" not in update_kw:
+                        raise
+                    update_kw.pop("activity_type")
+                    self._supports_activity_type = False
+                    log.info("pypresence lacks activity_type; presence shows as 'Playing'")
+                    self._rpc.update(**update_kw)
             except Exception as e:
                 log.error("Discord RPC update failed: %s (track=%s)", e, details, exc_info=True)
                 self._drop_connection()
@@ -247,19 +274,28 @@ class DiscordPresence:
             return None
         thumb_hash = hashlib.sha1(cover_art).hexdigest()
         now = time.time()
-        retry_failed = self._cached_cover_url is None and now >= self._cover_retry_at
-        if thumb_hash != self._last_cover_hash or retry_failed:
-            self._last_cover_hash = thumb_hash
-            self._cached_cover_url = upload_cover_art(cover_art)
-            if self._cached_cover_url:
-                log.debug("Cover art uploaded: %s", self._cached_cover_url)
-            else:
-                # Don't hammer dead hosts every poll, but do retry eventually
-                # instead of losing art for the whole album.
-                self._cover_retry_at = now + self._UPLOAD_RETRY_INTERVAL
-                log.warning(
-                    "Cover art upload failed (hash %s); retrying in %ds",
-                    thumb_hash[:8],
-                    self._UPLOAD_RETRY_INTERVAL,
-                )
-        return self._cached_cover_url
+
+        cached = self._cover_cache.get(thumb_hash)
+        if cached is not None and (now - cached[1]) < self._COVER_URL_TTL:
+            return cached[0]
+        if now < self._cover_fail_at.get(thumb_hash, 0.0):
+            return None
+
+        url = upload_cover_art(cover_art)
+        if url:
+            self._cover_cache[thumb_hash] = (url, now)
+            self._cover_fail_at.pop(thumb_hash, None)
+            if len(self._cover_cache) > self._COVER_CACHE_MAX:
+                oldest = min(self._cover_cache, key=lambda h: self._cover_cache[h][1])
+                del self._cover_cache[oldest]
+            log.debug("Cover art uploaded: %s", url)
+            return url
+        # Don't hammer dead hosts every poll, but do retry eventually instead
+        # of losing art for the whole album.
+        self._cover_fail_at[thumb_hash] = now + self._UPLOAD_RETRY_INTERVAL
+        log.warning(
+            "Cover art upload failed (hash %s); retrying in %ds",
+            thumb_hash[:8],
+            self._UPLOAD_RETRY_INTERVAL,
+        )
+        return None

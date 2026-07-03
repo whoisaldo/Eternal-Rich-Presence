@@ -70,8 +70,15 @@ def make_dp(cover_upload=False):
     return dp, factory
 
 
-def track(title="Song Title", artist="Artist", album="Album", pos=10, cover=None):
-    return TrackInfo(title=title, artist=artist, album=album, position_sec=pos, cover_art=cover)
+def track(title="Song Title", artist="Artist", album="Album", pos=10, cover=None, duration=None):
+    return TrackInfo(
+        title=title,
+        artist=artist,
+        album=album,
+        position_sec=pos,
+        duration_sec=duration,
+        cover_art=cover,
+    )
 
 
 def test_fit_field_bounds():
@@ -236,11 +243,91 @@ def test_upload_failure_backs_off_then_retries(monkeypatch):
     assert len(calls) == 1
 
     # After the backoff window: retried and the real URL goes out.
-    dp._cover_retry_at = 0
+    dp._cover_fail_at.clear()
     dp._last_update_time = 0
     dp.update(track(cover=b"img"))
     assert len(calls) == 2
     assert factory.last.updates[-1]["large_image"] == "https://litter.example/b.jpg"
+
+
+def test_cover_cache_holds_multiple_albums(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        presence_mod,
+        "upload_cover_art",
+        lambda b: calls.append(b) or f"https://litter.example/{len(calls)}.jpg",
+    )
+    factory = RPCFactory()
+    dp = DiscordPresence("123", cover_upload=True, rpc_factory=factory)
+    dp.connect()
+    # Alternating between two albums used to re-upload on every switch
+    # (the old cache remembered only the single last hash).
+    dp.update(track(title="One", cover=b"art-A"))
+    dp.update(track(title="Two", cover=b"art-B"))
+    dp.update(track(title="Three", cover=b"art-A"))
+    dp.update(track(title="Four", cover=b"art-B"))
+    assert len(calls) == 2
+
+
+def test_cover_url_expires_with_host_ttl(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        presence_mod,
+        "upload_cover_art",
+        lambda b: calls.append(1) or f"https://litter.example/{len(calls)}.jpg",
+    )
+    factory = RPCFactory()
+    dp = DiscordPresence("123", cover_upload=True, rpc_factory=factory)
+    dp.connect()
+    dp.update(track(cover=b"img"))
+    assert len(calls) == 1
+    # Age the cached URL past the host's 24h lifetime: it must re-upload
+    # instead of handing Discord a dead link.
+    h, (url, _at) = next(iter(dp._cover_cache.items()))
+    dp._cover_cache[h] = (url, 0.0)
+    dp._last_update_time = 0
+    dp.update(track(cover=b"img"))
+    assert len(calls) == 2
+
+
+def test_listening_activity_type_sent():
+    dp, factory = make_dp()
+    dp.update(track())
+    assert factory.last.updates[-1]["activity_type"] == 2
+
+
+def test_activity_type_falls_back_on_old_pypresence():
+    dp, factory = make_dp()
+
+    real_update = factory.last.update
+
+    def picky_update(**kw):
+        if "activity_type" in kw:
+            raise TypeError("update() got an unexpected keyword argument 'activity_type'")
+        real_update(**kw)
+
+    factory.last.update = picky_update
+    dp.update(track())
+    assert "activity_type" not in factory.last.updates[-1]
+    assert dp.is_connected
+    # Permanently remembered: the next track doesn't retry the bad kwarg.
+    dp.update(track(title="Next Song"))
+    assert "activity_type" not in factory.last.updates[-1]
+
+
+def test_end_timestamp_with_duration():
+    dp, factory = make_dp()
+    dp.update(track(pos=30))
+    assert "end" not in factory.last.updates[-1]  # no duration -> no end
+    dp.update(track(title="Timed", pos=30, duration=200))
+    kw = factory.last.updates[-1]
+    assert kw["end"] == kw["start"] + 200
+
+
+def test_no_end_without_position():
+    dp, factory = make_dp()
+    dp.update(track(pos=None, duration=200))
+    assert "end" not in factory.last.updates[-1]
 
 
 def test_transient_missing_cover_keeps_cache(monkeypatch):
