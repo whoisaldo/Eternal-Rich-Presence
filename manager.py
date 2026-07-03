@@ -6,6 +6,8 @@
 # Free Software Foundation, either version 3 of the License, or (at your
 # option) any later version. See <https://www.gnu.org/licenses/> for details.
 
+import time
+from dataclasses import replace
 from typing import Optional
 
 from logger import get_logger
@@ -23,6 +25,9 @@ class ProviderManager:
         self._state = "idle"
         self._status_detail = "Waiting for music"
         self._last_error: Optional[str] = None
+        # Last playing track and when it was seen, for the one-cycle grace.
+        self._last_playing: Optional[tuple[TrackInfo, float]] = None
+        self._grace_used = False
 
     @property
     def active_provider(self) -> Optional[BaseProvider]:
@@ -47,16 +52,6 @@ class ProviderManager:
         for provider in self._providers:
             try:
                 track = provider.get_now_playing()
-                if track is None:
-                    continue
-                if track.is_playing:
-                    self._active = provider
-                    self._state = "playing"
-                    self._status_detail = f"Playing from {provider.name}"
-                    self._last_error = None
-                    return track
-                if paused_provider is None:
-                    paused_provider = provider
             except Exception as e:
                 provider_errors.append((provider.name, str(e)))
                 log.warning(
@@ -64,8 +59,24 @@ class ProviderManager:
                     provider.name,
                     exc_info=True,
                 )
+                grace = self._grace_track(provider)
+                if grace is not None:
+                    return grace
                 continue
+            if track is None:
+                continue
+            if track.is_playing:
+                self._active = provider
+                self._state = "playing"
+                self._status_detail = f"Playing from {provider.name}"
+                self._last_error = None
+                self._last_playing = (track, time.monotonic())
+                self._grace_used = False
+                return track
+            if paused_provider is None:
+                paused_provider = provider
 
+        self._last_playing = None
         if paused_provider is not None:
             self._active = paused_provider
             self._state = "paused"
@@ -84,3 +95,18 @@ class ProviderManager:
             self._status_detail = "Waiting for music"
             self._last_error = None
         return None
+
+    def _grace_track(self, provider: BaseProvider) -> Optional[TrackInfo]:
+        """One-cycle grace: when the active provider throws once, keep showing
+        the last playing track (position advanced) instead of blanking the
+        presence for a transient hiccup. A second consecutive failure falls
+        through to the normal error handling."""
+        if provider is not self._active or self._grace_used or self._last_playing is None:
+            return None
+        self._grace_used = True
+        track, seen_at = self._last_playing
+        if track.position_sec is not None:
+            elapsed = time.monotonic() - seen_at
+            track = replace(track, position_sec=int(track.position_sec + elapsed))
+        log.debug("Provider %s hiccuped; reusing last track for one poll", provider.name)
+        return track
