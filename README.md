@@ -33,7 +33,7 @@ You do **not** need to run the app as Administrator for normal use. Listen Along
 
 - Spotify support improves playback detection and enables direct Listen Along playback.
 - Create an app in the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard).
-- Set the redirect URI to `http://localhost:8888/callback` unless you intentionally use a different one.
+- Set the redirect URI to `http://127.0.0.1:8888/callback` unless you intentionally use a different one. (Spotify no longer accepts `localhost` for new apps — use the loopback IP.)
 - Remote playback requires Spotify Premium and an active Spotify device.
 
 ### Privacy

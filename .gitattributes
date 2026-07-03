@@ -1,5 +1,6 @@
-# Normalize line endings: store text as LF in the repo, check out native.
-# Keeps diffs clean across contributors regardless of core.autocrlf.
+# Normalize line endings: store AND check out text as LF everywhere
+# (eol=lf forces LF working trees too — deliberate, so checkouts are
+# byte-identical across contributors regardless of core.autocrlf).
 * text=auto eol=lf
 
 # Binary assets — never normalize or diff as text.
