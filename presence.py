@@ -10,6 +10,7 @@ import hashlib
 import os
 import threading
 import time
+import uuid
 from typing import Optional
 
 from logger import get_logger
@@ -68,6 +69,9 @@ class DiscordPresence:
         self._rpc = None
         self._lock = threading.RLock()
         self._cleared = True
+        # Unique per process: a shared literal party id would make every
+        # installation of the app look like the same Discord party.
+        self._party_id = f"eternal-{uuid.uuid4().hex[:12]}"
         self._last_track_key: Optional[str] = None
         self._last_cover_hash: Optional[str] = None
         self._last_cover_url_sent: Optional[str] = None
@@ -148,7 +152,9 @@ class DiscordPresence:
         details = _fit_field(title_raw)
         state = _fit_field(f"by {artist_raw}")
         large_text = _fit_field(track.album or title_raw)
-        track_key = f"{details}|{state}"
+        # Album included: a same-titled track from a different album must
+        # refresh large_text instead of riding the debounce.
+        track_key = f"{details}|{state}|{large_text}"
 
         now = time.time()
         pos = int(track.position_sec) if track.position_sec is not None else 0
@@ -182,7 +188,9 @@ class DiscordPresence:
             update_kw = dict(
                 state=state,
                 details=details,
-                party_id="eternal-session-1",
+                party_id=self._party_id,
+                # One open slot is required for Discord to render the Join
+                # button; the "1 of 2" count itself is cosmetic.
                 party_size=[1, 2],
                 join=join_secret,
                 start=locked_start,

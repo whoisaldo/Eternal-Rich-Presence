@@ -52,7 +52,7 @@ from app_info import (
     EMBEDDED_CLIENT_ID,
     PLACEHOLDER_CLIENT_ID,
 )
-from logger import LOG_PATH, get_logger
+from logger import get_log_path, get_logger
 
 if TYPE_CHECKING:
     from PIL import Image
@@ -61,6 +61,15 @@ log = get_logger("erp.main")
 
 _ICON_NAME = "Apple_Music_Icon.png"
 _OWN_CONSOLE_ENV = "ETERNALRP_OWN_CONSOLE"
+POLL_INTERVAL_SEC = 5
+
+
+def _reload_config() -> None:
+    """Force the next ``import config`` to see the file's current contents."""
+    if "config" in sys.modules:
+        import importlib
+
+        importlib.reload(sys.modules["config"])
 
 
 def _create_default_config() -> None:
@@ -169,7 +178,7 @@ def _open_path(path: str) -> None:
 def _print_debug_paths() -> None:
     print(f"app_dir={_app_dir}")
     print(f"config={_config_path()}")
-    print(f"log={LOG_PATH}")
+    print(f"log={get_log_path()}")
 
 
 def _should_spawn_new_console(args: list[str]) -> bool:
@@ -227,10 +236,14 @@ def _build_spotify_provider():
     return SpotifyProvider(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, redirect)
 
 
-def run_listener_mode(uri: str) -> int:
+def run_listener_mode(uri: str, spotify_provider=None) -> int:
     """
     Parse an eternalrp:// URI and attempt to start playback on the listener's
     device. Tries Spotify first (if configured), then opens an Apple Music search.
+
+    ``spotify_provider`` lets host mode pass its existing provider in, so an
+    in-process ACTIVITY_JOIN doesn't build a second client racing the first
+    over the shared token cache.
     """
     from utils import parse_join_secret
 
@@ -254,7 +267,7 @@ def run_listener_mode(uri: str) -> int:
     position_ms = position_sec * 1000
 
     try:
-        sp = _build_spotify_provider()
+        sp = spotify_provider if spotify_provider is not None else _build_spotify_provider()
         if sp is not None:
             if sp.search_and_play(track_name, artist_name, position_ms=position_ms):
                 log.info("Playback started on Spotify: %s at %ds", display, position_sec)
@@ -331,10 +344,7 @@ def run_host_mode() -> int:
     # exists yet, write one so the setup GUI can be skipped.
     if EMBEDDED_CLIENT_ID and not os.path.isfile(cfg_path):
         _create_default_config()
-        if "config" in sys.modules:
-            import importlib
-
-            importlib.reload(sys.modules["config"])
+        _reload_config()
         log.info("Created config with embedded Discord Client ID")
 
     # Resolve and validate CLIENT_ID on a live path: a missing config, or one
@@ -343,7 +353,10 @@ def run_host_mode() -> int:
     try:
         from config import CLIENT_ID
 
-        needs_setup = not CLIENT_ID or CLIENT_ID == PLACEHOLDER_CLIENT_ID
+        # str() + isdigit: an unquoted or garbage CLIENT_ID (a plausible
+        # Notepad edit) must route to setup, not fail silently in pypresence.
+        CLIENT_ID = str(CLIENT_ID).strip() if CLIENT_ID is not None else ""
+        needs_setup = not CLIENT_ID or CLIENT_ID == PLACEHOLDER_CLIENT_ID or not CLIENT_ID.isdigit()
     except ImportError:
         needs_setup = True
     except Exception as e:
@@ -362,12 +375,10 @@ def run_host_mode() -> int:
                 log.info("Setup cancelled by user")
                 return 1
             setup_completed = True
-            import importlib
-
-            if "config" in sys.modules:
-                importlib.reload(sys.modules["config"])
+            _reload_config()
             from config import CLIENT_ID
 
+            CLIENT_ID = str(CLIENT_ID).strip() if CLIENT_ID is not None else ""
             if not CLIENT_ID or CLIENT_ID == PLACEHOLDER_CLIENT_ID:
                 _msgbox("Discord Client ID is still not set. Please try again.")
                 return 1
@@ -385,6 +396,7 @@ def run_host_mode() -> int:
     from manager import ProviderManager
 
     provider_list = []
+    spotify_provider = None
 
     try:
         spotify_provider = _build_spotify_provider()
@@ -434,10 +446,11 @@ def run_host_mode() -> int:
         from discord_events import DiscordEventListener
 
         def _on_join_event(secret: str):
-            log.info("ACTIVITY_JOIN received via event listener: %s", secret)
+            log.debug("Dispatching ACTIVITY_JOIN to listener mode: %s", secret)
             threading.Thread(
                 target=run_listener_mode,
                 args=(secret,),
+                kwargs={"spotify_provider": spotify_provider},
                 daemon=True,
             ).start()
 
@@ -453,7 +466,6 @@ def run_host_mode() -> int:
 
     stop_event = threading.Event()
     paused = threading.Event()
-    interval = 5
     tray = None
 
     def _refresh_tray_title(current_track=None):
@@ -499,7 +511,7 @@ def run_host_mode() -> int:
                     log.warning("Discord connection dropped, retrying: %s", e)
                 except Exception as e:
                     log.warning("Poll error (will retry): %s", e, exc_info=True)
-            stop_event.wait(interval)
+            stop_event.wait(POLL_INTERVAL_SEC)
 
     poll_thread = threading.Thread(target=_poll_loop, daemon=True)
     poll_thread.start()
@@ -585,12 +597,12 @@ def run_host_mode() -> int:
                 )
 
         def on_open_log(_icon, _item):
-            log.info("Opening log file: %s", LOG_PATH)
+            log.info("Opening log file: %s", get_log_path())
             try:
-                os.startfile(LOG_PATH)
+                os.startfile(get_log_path())
             except Exception as e:
                 log.warning("Could not open log file: %s", e)
-                _msgbox(f"Log file:\n{LOG_PATH}")
+                _msgbox(f"Log file:\n{get_log_path()}")
 
         def on_open_setup(_icon, _item):
             try:
@@ -610,7 +622,7 @@ def run_host_mode() -> int:
                 log.error("Could not open setup window: %s", e, exc_info=True)
                 _msgbox(
                     "The setup window couldn't be opened.\n\n"
-                    f"Check the log file for details:\n{LOG_PATH}"
+                    f"Check the log file for details:\n{get_log_path()}"
                 )
 
         def on_open_config(_icon, _item):
@@ -650,14 +662,15 @@ def run_host_mode() -> int:
             except Exception as e:
                 log.error("Listen Along repair failed: %s", e, exc_info=True)
                 _msgbox(
-                    f"Listen Along repair failed.\n\nCheck the log file for details:\n{LOG_PATH}"
+                    "Listen Along repair failed.\n\n"
+                    f"Check the log file for details:\n{get_log_path()}"
                 )
 
         def on_copy_log_path(_icon, _item):
-            if _copy_to_clipboard(LOG_PATH):
+            if _copy_to_clipboard(get_log_path()):
                 log.debug("Log path copied to clipboard")
             else:
-                _msgbox(f"Log path:\n{LOG_PATH}")
+                _msgbox(f"Log path:\n{get_log_path()}")
 
         def on_help(_icon, _item):
             webbrowser.open(APP_REPO_URL)
@@ -665,7 +678,7 @@ def run_host_mode() -> int:
         def on_print_paths(_icon, _item):
             log.info("App directory: %s", _app_dir)
             log.info("Config path: %s", _config_path())
-            log.info("Log path: %s", LOG_PATH)
+            log.info("Log path: %s", get_log_path())
             _print_debug_paths()
 
         def on_about(_icon, _item):
@@ -724,7 +737,7 @@ def run_host_mode() -> int:
             pystray.MenuItem(_discord_status_label, lambda: None, enabled=False),
             pystray.MenuItem(_details_label, lambda: None, enabled=False),
             pystray.MenuItem(
-                lambda _item: f"Log: {os.path.basename(LOG_PATH)}",
+                lambda _item: f"Log: {os.path.basename(get_log_path())}",
                 lambda: None,
                 enabled=False,
             ),
@@ -906,14 +919,24 @@ def main() -> int:
         return 0 if run_setup_gui() else 1
 
     if "--open-config" in args:
-        if not os.path.isfile(_config_path()):
-            _create_default_config()
-        _open_path(_config_path())
-        return 0
+        try:
+            if not os.path.isfile(_config_path()):
+                _create_default_config()
+            _open_path(_config_path())
+            return 0
+        except Exception as e:
+            log.error("Could not open config file: %s", e)
+            _msgbox(f"The config file couldn't be opened.\n\nPath:\n{_config_path()}")
+            return 1
 
     if "--open-log" in args:
-        _open_path(LOG_PATH)
-        return 0
+        try:
+            _open_path(get_log_path())
+            return 0
+        except Exception as e:
+            log.error("Could not open log file: %s", e)
+            _msgbox(f"Log file:\n{get_log_path()}")
+            return 1
 
     if "--print-paths" in args:
         _print_debug_paths()

@@ -24,7 +24,6 @@ APP_VERSION_DISPLAY = "2.0"
 APP_AUTHOR = "Ali Younes (@whoisaldo)"
 APP_REPO_URL = "https://github.com/whoisaldo/Eternal-Rich-Presence"
 APP_SUPPORT_EMAIL = "Aliyounes@eternalreverse.com"
-APP_LICENSE = "GPL-3.0-or-later"
 
 DEFAULT_ASSET_KEY = "apple_music"
 
@@ -44,8 +43,6 @@ PLACEHOLDER_CLIENT_ID = "YOUR_DISCORD_CLIENT_ID"
 # Discord *client secret* next to it — this app neither has nor needs one.
 # Set this before release so users get Discord preconfigured and never have to look it up.
 EMBEDDED_CLIENT_ID = "1475237860218241064"
-
-APP_USER_AGENT = f"{APP_NAME}/{APP_VERSION_DISPLAY}"
 
 
 def app_root() -> str:

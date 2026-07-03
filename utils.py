@@ -188,14 +188,16 @@ def _multipart_post(
     req.add_header("Content-Type", "multipart/form-data; boundary=" + boundary.decode())
     req.add_header("User-Agent", _UPLOAD_USER_AGENT)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        result = resp.read().decode().strip()
+        # The response should be one short URL; cap the read so a misbehaving
+        # host can't balloon memory.
+        result = resp.read(1024).decode(errors="replace").strip()
     if result and validate(result):
         return result
     return None
 
 
 def _valid_url(url: str, must_contain: str = "") -> bool:
-    return url.startswith("http") and len(url) < 500 and (must_contain in url)
+    return url.startswith(("http://", "https://")) and len(url) < 500 and (must_contain in url)
 
 
 # Cover-art upload hosts, tried in order. Expiring hosts come first so that
@@ -365,8 +367,8 @@ def _protocol_command(exe_path: Optional[str] = None) -> str:
     return f'"{os.path.abspath(sys.executable)}" "{script}" "%1"'
 
 
-def register_uri_scheme(exe_path: Optional[str] = None, silent: bool = False) -> bool:
-    """Register the eternalrp:// protocol handler for the current Windows user."""
+def _register_protocol(protocol: str, exe_path: Optional[str], silent: bool) -> bool:
+    """Register a URL protocol handler under HKCU (no admin required)."""
     try:
         import winreg
     except ImportError:
@@ -375,22 +377,25 @@ def register_uri_scheme(exe_path: Optional[str] = None, silent: bool = False) ->
         return False
 
     command = _protocol_command(exe_path)
-
     try:
-        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"SOFTWARE\Classes\eternalrp") as k:
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"SOFTWARE\Classes\{protocol}") as k:
             winreg.SetValueEx(k, None, 0, winreg.REG_SZ, f"URL:{APP_NAME}")
             winreg.SetValueEx(k, "URL Protocol", 0, winreg.REG_SZ, "")
         with winreg.CreateKey(
-            winreg.HKEY_CURRENT_USER,
-            r"SOFTWARE\Classes\eternalrp\shell\open\command",
+            winreg.HKEY_CURRENT_USER, rf"SOFTWARE\Classes\{protocol}\shell\open\command"
         ) as k:
             winreg.SetValueEx(k, None, 0, winreg.REG_SZ, command)
         return True
     except OSError as e:
-        log.warning("URI registration failed: %s", e)
+        log.warning("%s:// registration failed: %s", protocol, e)
         if not silent:
-            print(f"URI registration failed: {e}", file=sys.stderr)
+            print(f"{protocol}:// registration failed: {e}", file=sys.stderr)
         return False
+
+
+def register_uri_scheme(exe_path: Optional[str] = None, silent: bool = False) -> bool:
+    """Register the eternalrp:// protocol handler for the current Windows user."""
+    return _register_protocol("eternalrp", exe_path, silent)
 
 
 def register_discord_launch(
@@ -401,30 +406,5 @@ def register_discord_launch(
     This is the mechanism Discord uses when a user clicks "Join" on someone's
     Rich Presence.  Discord opens ``discord-{client_id}://join/{secret}`` and
     the OS launches the registered command with the URL as an argument.
-
-    Written to HKCU (no admin required).
     """
-    try:
-        import winreg
-    except ImportError:
-        if not silent:
-            print("Registry access requires Windows.", file=sys.stderr)
-        return False
-
-    command = _protocol_command(exe_path)
-    protocol = f"discord-{client_id}"
-
-    try:
-        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"SOFTWARE\Classes\{protocol}") as k:
-            winreg.SetValueEx(k, None, 0, winreg.REG_SZ, "URL:Run EternalRichPresence")
-            winreg.SetValueEx(k, "URL Protocol", 0, winreg.REG_SZ, "")
-        with winreg.CreateKey(
-            winreg.HKEY_CURRENT_USER, rf"SOFTWARE\Classes\{protocol}\shell\open\command"
-        ) as k:
-            winreg.SetValueEx(k, None, 0, winreg.REG_SZ, command)
-        return True
-    except OSError as e:
-        log.warning("Discord protocol registration failed: %s", e)
-        if not silent:
-            print(f"Discord protocol registration failed: {e}", file=sys.stderr)
-        return False
+    return _register_protocol(f"discord-{client_id}", exe_path, silent)

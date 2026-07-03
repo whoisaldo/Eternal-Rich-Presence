@@ -18,7 +18,9 @@ from app_info import APP_NAME, app_root
 def _is_writable_dir(path: str) -> bool:
     try:
         os.makedirs(path, exist_ok=True)
-        probe_path = os.path.join(path, ".erp_write_test")
+        # pid-unique: two instances probing at once (double-clicked Join
+        # links) must not race on the same file and misjudge the directory.
+        probe_path = os.path.join(path, f".erp_write_test.{os.getpid()}")
         with open(probe_path, "w", encoding="utf-8") as handle:
             handle.write("ok")
         os.remove(probe_path)
@@ -85,6 +87,15 @@ def _configure_base_logger() -> logging.Logger:
     base.addHandler(ch)
     base.propagate = False
     return base
+
+
+def get_log_path() -> str:
+    """The log file actually in use.
+
+    Prefer this over ``from logger import LOG_PATH``: the by-value import goes
+    stale if handler setup falls back to the temp-dir path at runtime.
+    """
+    return LOG_PATH
 
 
 def get_logger(name: str = "erp") -> logging.Logger:
