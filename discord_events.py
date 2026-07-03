@@ -32,16 +32,73 @@ log = get_logger("erp.discord_events")
 
 _GENERIC_RW = 0xC0000000
 _OPEN_EXISTING = 3
+_ERROR_PIPE_BUSY = 231
 
-_kernel32 = ctypes.windll.kernel32
-_CreateFileW = _kernel32.CreateFileW
-_CreateFileW.restype = ctypes.wintypes.HANDLE
-_ReadFile = _kernel32.ReadFile
-_WriteFile = _kernel32.WriteFile
-_CloseHandle = _kernel32.CloseHandle
-_PeekNamedPipe = _kernel32.PeekNamedPipe
+_OP_CLOSE = 2
+_OP_PING = 3
+_OP_PONG = 4
 
-_INVALID_HANDLE = ctypes.wintypes.HANDLE(-1).value
+if os.name == "nt":
+    from ctypes import wintypes as _wt
+
+    _kernel32 = ctypes.windll.kernel32
+    # Explicit argtypes/restype: without them a 64-bit HANDLE goes through
+    # ctypes' default C-int conversion and a value >= 2**31 would raise
+    # ArgumentError on every call, silently killing the listener.
+    _CreateFileW = _kernel32.CreateFileW
+    _CreateFileW.restype = _wt.HANDLE
+    _CreateFileW.argtypes = [
+        _wt.LPCWSTR,
+        _wt.DWORD,
+        _wt.DWORD,
+        ctypes.c_void_p,
+        _wt.DWORD,
+        _wt.DWORD,
+        _wt.HANDLE,
+    ]
+    _ReadFile = _kernel32.ReadFile
+    _ReadFile.restype = _wt.BOOL
+    _ReadFile.argtypes = [
+        _wt.HANDLE,
+        ctypes.c_void_p,
+        _wt.DWORD,
+        ctypes.POINTER(_wt.DWORD),
+        ctypes.c_void_p,
+    ]
+    _WriteFile = _kernel32.WriteFile
+    _WriteFile.restype = _wt.BOOL
+    _WriteFile.argtypes = [
+        _wt.HANDLE,
+        ctypes.c_void_p,
+        _wt.DWORD,
+        ctypes.POINTER(_wt.DWORD),
+        ctypes.c_void_p,
+    ]
+    _CloseHandle = _kernel32.CloseHandle
+    _CloseHandle.restype = _wt.BOOL
+    _CloseHandle.argtypes = [_wt.HANDLE]
+    _PeekNamedPipe = _kernel32.PeekNamedPipe
+    _PeekNamedPipe.restype = _wt.BOOL
+    _PeekNamedPipe.argtypes = [
+        _wt.HANDLE,
+        ctypes.c_void_p,
+        _wt.DWORD,
+        ctypes.POINTER(_wt.DWORD),
+        ctypes.POINTER(_wt.DWORD),
+        ctypes.POINTER(_wt.DWORD),
+    ]
+    _WaitNamedPipeW = _kernel32.WaitNamedPipeW
+    _WaitNamedPipeW.restype = _wt.BOOL
+    _WaitNamedPipeW.argtypes = [_wt.LPCWSTR, _wt.DWORD]
+    _GetLastError = _kernel32.GetLastError
+    _INVALID_HANDLE = _wt.HANDLE(-1).value
+else:
+    # Non-Windows: keep the module importable so the pure framing/dispatch
+    # logic stays testable on the Linux CI runner and the macOS dev machine.
+    _kernel32 = None
+    _CreateFileW = _ReadFile = _WriteFile = _CloseHandle = _PeekNamedPipe = None
+    _WaitNamedPipeW = _GetLastError = None
+    _INVALID_HANDLE = -1
 
 
 def _is_valid_handle(h) -> bool:
@@ -58,6 +115,13 @@ def _open_pipe() -> Optional[int]:
         if _is_valid_handle(handle):
             log.debug("Connected to Discord pipe %d", i)
             return handle
+        # Every instance busy: the canonical recovery is WaitNamedPipe +
+        # one retry, instead of skipping the slot for a whole 10s cycle.
+        if _GetLastError() == _ERROR_PIPE_BUSY and _WaitNamedPipeW(path, 500):
+            handle = _CreateFileW(path, _GENERIC_RW, 0, None, _OPEN_EXISTING, 0, None)
+            if _is_valid_handle(handle):
+                log.debug("Connected to Discord pipe %d after busy-wait", i)
+                return handle
     return None
 
 
@@ -98,13 +162,8 @@ def _read_exact(handle: int, n: int) -> bytes:
     return bytes(chunks)
 
 
-def _read(handle: int, timeout_ms: int = 5000) -> Optional[dict]:
-    """Blocking read of a single RPC frame with timeout.
-
-    Returns the parsed JSON dict, ``None`` on timeout, or raises
-    ``_PipeBroken`` if the pipe has been closed by Discord.
-    """
-    deadline = time.monotonic() + timeout_ms / 1000.0
+def _wait_for_frame(handle: int, deadline: float) -> bool:
+    """Poll until a frame header is available or the deadline passes."""
     peek_failures = 0
     while time.monotonic() < deadline:
         avail = ctypes.wintypes.DWORD(0)
@@ -117,24 +176,45 @@ def _read(handle: int, timeout_ms: int = 5000) -> Optional[dict]:
             continue
         peek_failures = 0
         if avail.value >= 8:
-            break
-        time.sleep(0.05)
-    else:
-        return None
+            return True
+        # Join latency is human-scale; 0.15s keeps idle wakeups modest
+        # (the old 50ms cadence woke this thread ~20x/sec forever).
+        time.sleep(0.15)
+    return False
 
-    _op, length = struct.unpack("<II", _read_exact(handle, 8))
 
-    if length > 1024 * 1024:
-        raise _PipeBroken(f"Implausible frame length: {length}")
-    if length == 0:
-        return {}
+def _read(handle: int, timeout_ms: int = 5000) -> Optional[dict]:
+    """Blocking read of a single RPC frame with timeout.
 
-    body = _read_exact(handle, length)
-    try:
-        return json.loads(body.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError) as e:
-        log.warning("Invalid RPC frame JSON: %s", e)
-        raise _PipeBroken("Invalid JSON in RPC frame") from e
+    Returns the parsed JSON dict, ``None`` on timeout, or raises
+    ``_PipeBroken`` if the pipe has been closed by Discord. Protocol frames
+    are handled here: PING is echoed back as PONG, and CLOSE surfaces
+    Discord's close code instead of a generic handshake error.
+    """
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    while True:
+        if not _wait_for_frame(handle, deadline):
+            return None
+
+        op, length = struct.unpack("<II", _read_exact(handle, 8))
+        if length > 1024 * 1024:
+            raise _PipeBroken(f"Implausible frame length: {length}")
+
+        payload: dict = {}
+        if length:
+            body = _read_exact(handle, length)
+            try:
+                payload = json.loads(body.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                log.warning("Invalid RPC frame JSON: %s", e)
+                raise _PipeBroken("Invalid JSON in RPC frame") from e
+
+        if op == _OP_PING:
+            _write(handle, _OP_PONG, payload)
+            continue
+        if op == _OP_CLOSE:
+            raise _PipeBroken(f"Discord closed the connection: {payload}")
+        return payload
 
 
 class DiscordEventListener:
@@ -153,6 +233,11 @@ class DiscordEventListener:
         self._stop = threading.Event()
 
     def start(self):
+        # Idempotent: a second start() must not clear the stop flag the
+        # running worker is watching and leak a duplicate listener.
+        if self._thread is not None and self._thread.is_alive():
+            log.debug("Event listener already running")
+            return
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, daemon=True, name="discord-events")
         self._thread.start()
@@ -160,6 +245,8 @@ class DiscordEventListener:
     def stop(self):
         self._stop.set()
         self._close_handle()
+        if self._thread is not None:
+            self._thread.join(timeout=3)
 
     def _close_handle(self):
         with self._handle_lock:
