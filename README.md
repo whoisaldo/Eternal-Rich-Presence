@@ -38,7 +38,7 @@ You do **not** need to run the app as Administrator for normal use. Listen Along
 
 ### Privacy
 
-Two settings in `config.py` control what leaves your machine:
+Two settings control what leaves your machine — both editable in the setup window, the tray `Settings` menu, or `config.py`:
 
 - `AUTO_ACCEPT_JOIN_REQUESTS` (default `True`) — when someone clicks **Join** on your Rich Presence, the request is accepted automatically. Set to `False` to ignore join requests.
 - `COVER_ART_UPLOAD` (default `True`) — your current album art is uploaded to a public image host so Discord can display it. Set to `False` to show the static app icon instead and never upload artwork.
@@ -67,6 +67,9 @@ python main.py --open-log
 python main.py --print-paths
 python main.py --clear
 python main.py --register-uri
+python main.py --unregister-uri
+python main.py --version
+python main.py --help
 ```
 
 These are intended for local debugging and support, while the normal release flow stays tray-first and simple for end users.
@@ -107,6 +110,7 @@ When running in host mode the app lives in the Windows system tray.
 | Repair Listen Along | Re-registers the custom protocol handlers |
 | Pause / Resume | Temporarily disable or resume Rich Presence updates |
 | Reconnect to Discord | Re-establish the Discord RPC connection |
+| Settings > | Start with Windows, album-art upload, and auto-accept join toggles |
 | Help | Opens the project page |
 | Dev > | Setup, config, app folder, log tools, and advanced troubleshooting |
 | Exit | Disconnect and quit |

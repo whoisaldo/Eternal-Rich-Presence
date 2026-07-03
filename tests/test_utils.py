@@ -15,7 +15,15 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils import _detect_image_format, _encode_within, _protocol_command, _valid_url  # noqa: E402
+from utils import (  # noqa: E402
+    _detect_image_format,
+    _encode_within,
+    _protocol_command,
+    _valid_url,
+    is_autostart_enabled,
+    set_autostart,
+    unregister_protocols,
+)
 
 
 def test_source_mode_includes_entry_script():
@@ -53,6 +61,14 @@ def test_valid_url_requires_http_scheme():
     assert not _valid_url("httpfoo://evil.example", "")
     assert not _valid_url("ftp://files.example/x", "")
     assert not _valid_url("https://" + "a" * 600, "")
+
+
+def test_registry_helpers_degrade_gracefully_off_windows():
+    if sys.platform == "win32":
+        return  # exercised for real on the Windows CI job
+    assert set_autostart(True) is False
+    assert is_autostart_enabled() is False
+    assert unregister_protocols("123") is False
 
 
 def test_encode_within_budget_boundaries():

@@ -21,6 +21,7 @@ from utils import (  # noqa: E402
     _CONFIG_DEFAULTS,
     read_config_values,
     render_config,
+    update_config_values,
     write_config_file,
 )
 
@@ -92,6 +93,40 @@ def test_gui_writer_preserves_privacy_toggles(tmp_path):
     assert vals["AUTO_ACCEPT_JOIN_REQUESTS"] is False  # was silently reset before
     assert vals["COVER_ART_UPLOAD"] is False
     assert vals["SPOTIFY_REDIRECT_URI"] == _CONFIG_DEFAULTS["SPOTIFY_REDIRECT_URI"]
+
+
+def test_update_config_values_touches_only_the_named_key(tmp_path):
+    path = str(tmp_path / "config.py")
+    write_config_file(
+        render_config(client_id="42", spotify_client_secret="s3cret", cover_art_upload=False),
+        path,
+    )
+    update_config_values(path, AUTO_ACCEPT_JOIN_REQUESTS=False)
+    vals = read_config_values(path)
+    assert vals["AUTO_ACCEPT_JOIN_REQUESTS"] is False
+    assert vals["COVER_ART_UPLOAD"] is False  # untouched
+    assert vals["CLIENT_ID"] == "42"
+    assert vals["SPOTIFY_CLIENT_SECRET"] == "s3cret"
+
+
+def test_update_config_values_rejects_unknown_keys(tmp_path):
+    path = str(tmp_path / "config.py")
+    write_config_file(render_config(client_id="1"), path)
+    with pytest.raises(KeyError):
+        update_config_values(path, NOT_A_KEY=True)
+
+
+def test_gui_writer_accepts_explicit_toggles(tmp_path):
+    pytest.importorskip("tkinter")
+    from setup_gui import _write_config
+
+    path = str(tmp_path / "config.py")
+    _write_config(
+        "1", "apple_music", "", "", "", auto_accept=False, cover_upload=True, cfg_path=path
+    )
+    vals = read_config_values(path)
+    assert vals["AUTO_ACCEPT_JOIN_REQUESTS"] is False
+    assert vals["COVER_ART_UPLOAD"] is True
 
 
 def test_example_config_matches_canonical_keys():

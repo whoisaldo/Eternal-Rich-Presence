@@ -100,6 +100,28 @@ def read_config_values(path: Optional[str] = None) -> dict:
     return values
 
 
+def update_config_values(path: Optional[str] = None, **changes) -> str:
+    """Rewrite config.py with ``changes`` applied on top of current values.
+
+    Backs the tray quick-toggles: everything not being changed round-trips
+    through read_config_values, so no key is ever silently dropped."""
+    values = read_config_values(path)
+    for key, val in changes.items():
+        if key not in _CONFIG_DEFAULTS:
+            raise KeyError(f"Unknown config key: {key}")
+        values[key] = val
+    content = render_config(
+        client_id=values["CLIENT_ID"],
+        asset_key=values["ASSET_KEY"],
+        spotify_client_id=values["SPOTIFY_CLIENT_ID"],
+        spotify_client_secret=values["SPOTIFY_CLIENT_SECRET"],
+        spotify_redirect_uri=values["SPOTIFY_REDIRECT_URI"],
+        auto_accept_join_requests=values["AUTO_ACCEPT_JOIN_REQUESTS"],
+        cover_art_upload=values["COVER_ART_UPLOAD"],
+    )
+    return write_config_file(content, path)
+
+
 def write_config_file(content: str, path: Optional[str] = None) -> str:
     """Atomically write config.py (temp file + rename), returning its path.
 
@@ -408,3 +430,92 @@ def register_discord_launch(
     the OS launches the registered command with the URL as an argument.
     """
     return _register_protocol(f"discord-{client_id}", exe_path, silent)
+
+
+def _delete_key_tree(root, subkey: str) -> None:
+    """Delete a registry key and all of its subkeys (winreg has no recursive
+    delete). Missing keys are fine."""
+    import winreg
+
+    try:
+        with winreg.OpenKey(root, subkey) as key:
+            while True:
+                try:
+                    child = winreg.EnumKey(key, 0)
+                except OSError:
+                    break
+                _delete_key_tree(root, rf"{subkey}\{child}")
+    except FileNotFoundError:
+        return
+    try:
+        winreg.DeleteKey(root, subkey)
+    except FileNotFoundError:
+        pass
+
+
+def unregister_protocols(client_id: str = "") -> bool:
+    """Remove the HKCU protocol handlers — the only uninstall story a portable
+    exe has. Otherwise a deleted exe leaves dead eternalrp:// / discord-<id>://
+    handlers that break every Listen Along link the user clicks."""
+    try:
+        import winreg
+    except ImportError:
+        return False
+
+    ok = True
+    protocols = ["eternalrp"]
+    if client_id:
+        protocols.append(f"discord-{client_id}")
+    for protocol in protocols:
+        try:
+            _delete_key_tree(winreg.HKEY_CURRENT_USER, rf"SOFTWARE\Classes\{protocol}")
+        except OSError as e:
+            log.warning("Unregistering %s:// failed: %s", protocol, e)
+            ok = False
+    return ok
+
+
+_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+
+
+def _autostart_command() -> str:
+    if getattr(sys, "frozen", False):
+        return f'"{os.path.abspath(sys.executable)}"'
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.py")
+    return f'"{os.path.abspath(sys.executable)}" "{script}"'
+
+
+def set_autostart(enabled: bool) -> bool:
+    """Enable/disable launch at Windows sign-in via the HKCU Run key.
+
+    HKCU keeps the no-elevation guardrail intact — no UAC prompt, ever."""
+    try:
+        import winreg
+    except ImportError:
+        return False
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
+            if enabled:
+                winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, _autostart_command())
+            else:
+                try:
+                    winreg.DeleteValue(key, APP_NAME)
+                except FileNotFoundError:
+                    pass
+        return True
+    except OSError as e:
+        log.warning("Autostart update failed: %s", e)
+        return False
+
+
+def is_autostart_enabled() -> bool:
+    try:
+        import winreg
+    except ImportError:
+        return False
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY) as key:
+            winreg.QueryValueEx(key, APP_NAME)
+        return True
+    except OSError:
+        return False

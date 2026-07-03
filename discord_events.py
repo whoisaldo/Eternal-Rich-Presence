@@ -248,6 +248,10 @@ class DiscordEventListener:
         if self._thread is not None:
             self._thread.join(timeout=3)
 
+    def set_auto_accept(self, enabled: bool):
+        """Live-apply the AUTO_ACCEPT_JOIN_REQUESTS privacy toggle."""
+        self._auto_accept = bool(enabled)
+
     def _close_handle(self):
         with self._handle_lock:
             handle, self._handle = self._handle, None

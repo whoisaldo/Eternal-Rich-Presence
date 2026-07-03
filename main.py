@@ -46,6 +46,7 @@ from app_info import (
     APP_NAME,
     APP_REPO_URL,
     APP_SUPPORT_EMAIL,
+    APP_VERSION,
     APP_VERSION_DISPLAY,
     DEFAULT_ASSET_KEY,
     DEFAULT_SPOTIFY_REDIRECT_URI,
@@ -62,6 +63,69 @@ log = get_logger("erp.main")
 _ICON_NAME = "Apple_Music_Icon.png"
 _OWN_CONSOLE_ENV = "ETERNALRP_OWN_CONSOLE"
 POLL_INTERVAL_SEC = 5
+IDLE_POLL_INTERVAL_SEC = 20
+_IDLE_POLLS_BEFORE_BACKOFF = 24  # ≈2 minutes at the base cadence
+
+_USAGE = f"""{APP_NAME} — Discord Rich Presence for Apple Music & Spotify
+
+Usage: EternalRichPresence [option | eternalrp:// link]
+
+Options:
+  --setup            Open the settings window
+  --open-config      Open config.py in the default editor
+  --open-log         Open the log file
+  --print-paths      Print app/config/log paths
+  --clear            Force-clear any stuck Discord presence
+  --register-uri     Register the Listen Along link handlers
+  --unregister-uri   Remove the Listen Along link handlers
+  --version          Print the app version
+  --help             Show this help
+
+Run with no arguments to start the tray app."""
+
+_KNOWN_FLAGS = {
+    "--setup",
+    "--open-config",
+    "--open-log",
+    "--print-paths",
+    "--clear",
+    "--register-uri",
+    "--unregister-uri",
+    "--version",
+    "--help",
+    "-h",
+}
+
+_single_instance_mutex = None
+
+
+def _acquire_single_instance() -> bool:
+    """Hold a named mutex so a double-launched exe (a common reflex when the
+    tray icon isn't noticed) doesn't spawn two tray icons and two RPC
+    connections fighting over the same presence."""
+    global _single_instance_mutex
+    try:
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.CreateMutexW(None, False, f"{APP_NAME}.SingleInstance")
+        if not handle:
+            return True  # can't tell — don't block startup over it
+        if kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+            kernel32.CloseHandle(handle)
+            return False
+        _single_instance_mutex = handle  # keep the mutex alive for the process
+        return True
+    except Exception as e:
+        log.debug("Single-instance check unavailable: %s", e)
+        return True
+
+
+def _next_poll_interval(state: str, idle_polls: int) -> int:
+    """Poll cadence: back off after a stretch of idle (every idle poll spins
+    up a WinRT fetch and possibly a Spotify API call — the 'negligible idle
+    CPU' bar), snap back the moment anything plays or pauses."""
+    if state == "idle" and idle_polls >= _IDLE_POLLS_BEFORE_BACKOFF:
+        return IDLE_POLL_INTERVAL_SEC
+    return POLL_INTERVAL_SEC
 
 
 def _reload_config() -> None:
@@ -337,6 +401,15 @@ def run_host_mode() -> int:
     """
     log.info("Starting host mode")
 
+    if not _acquire_single_instance():
+        log.info("Another instance is already running; exiting")
+        _msgbox(
+            f"{APP_NAME} is already running.\n\n"
+            "Look for its icon in the system tray (check the overflow area).",
+            info=True,
+        )
+        return 0
+
     setup_completed = False
     cfg_path = _config_path()
 
@@ -485,6 +558,7 @@ def run_host_mode() -> int:
         tray.title = tip[:127]
 
     def _poll_loop():
+        idle_polls = 0
         while not stop_event.is_set():
             if not paused.is_set():
                 try:
@@ -511,7 +585,8 @@ def run_host_mode() -> int:
                     log.warning("Discord connection dropped, retrying: %s", e)
                 except Exception as e:
                     log.warning("Poll error (will retry): %s", e, exc_info=True)
-            stop_event.wait(POLL_INTERVAL_SEC)
+            idle_polls = idle_polls + 1 if mgr.state == "idle" else 0
+            stop_event.wait(_next_poll_interval(mgr.state, idle_polls))
 
     poll_thread = threading.Thread(target=_poll_loop, daemon=True)
     poll_thread.start()
@@ -672,6 +747,68 @@ def run_host_mode() -> int:
             else:
                 _msgbox(f"Log path:\n{get_log_path()}")
 
+        def on_unregister_listen_along(_icon, _item):
+            try:
+                from utils import unregister_protocols
+
+                ok = unregister_protocols(CLIENT_ID)
+                _msgbox(
+                    "Listen Along link handlers were removed for this Windows account."
+                    if ok
+                    else "Some link handlers could not be removed.",
+                    "Remove Listen Along Links",
+                    info=ok,
+                )
+            except Exception as e:
+                log.error("Unregister failed: %s", e, exc_info=True)
+
+        def _autostart_checked(_item):
+            from utils import is_autostart_enabled
+
+            return is_autostart_enabled()
+
+        def on_toggle_autostart(_icon, _item):
+            from utils import is_autostart_enabled, set_autostart
+
+            target = not is_autostart_enabled()
+            if set_autostart(target):
+                log.info("Start with Windows %s", "enabled" if target else "disabled")
+            else:
+                _msgbox("Couldn't update 'Start with Windows'. Check the log for details.")
+
+        def _cover_upload_checked(_item):
+            return _config_bool("COVER_ART_UPLOAD", True)
+
+        def on_toggle_cover_upload(_icon, _item):
+            new_value = not _config_bool("COVER_ART_UPLOAD", True)
+            try:
+                from utils import update_config_values
+
+                update_config_values(COVER_ART_UPLOAD=new_value)
+                _reload_config()
+                dp.set_cover_upload(new_value)
+                log.info("Cover art upload %s", "enabled" if new_value else "disabled")
+            except Exception as e:
+                log.error("Could not update COVER_ART_UPLOAD: %s", e, exc_info=True)
+                _msgbox("The setting couldn't be saved. Check the log for details.")
+
+        def _auto_accept_checked(_item):
+            return _config_bool("AUTO_ACCEPT_JOIN_REQUESTS", True)
+
+        def on_toggle_auto_accept(_icon, _item):
+            new_value = not _config_bool("AUTO_ACCEPT_JOIN_REQUESTS", True)
+            try:
+                from utils import update_config_values
+
+                update_config_values(AUTO_ACCEPT_JOIN_REQUESTS=new_value)
+                _reload_config()
+                if evt_listener is not None:
+                    evt_listener.set_auto_accept(new_value)
+                log.info("Auto-accept join requests %s", "enabled" if new_value else "disabled")
+            except Exception as e:
+                log.error("Could not update AUTO_ACCEPT_JOIN_REQUESTS: %s", e, exc_info=True)
+                _msgbox("The setting couldn't be saved. Check the log for details.")
+
         def on_help(_icon, _item):
             webbrowser.open(APP_REPO_URL)
 
@@ -750,6 +887,18 @@ def run_host_mode() -> int:
             pystray.MenuItem("Log Join Secret", on_log_join_secret),
             pystray.MenuItem("Open Log File", on_open_log),
             pystray.MenuItem("Copy Log Path", on_copy_log_path),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Remove Listen Along Links", on_unregister_listen_along),
+        )
+
+        settings_menu = pystray.Menu(
+            pystray.MenuItem("Start with Windows", on_toggle_autostart, checked=_autostart_checked),
+            pystray.MenuItem(
+                "Upload Album Art", on_toggle_cover_upload, checked=_cover_upload_checked
+            ),
+            pystray.MenuItem(
+                "Auto-Accept Join Requests", on_toggle_auto_accept, checked=_auto_accept_checked
+            ),
         )
 
         menu = pystray.Menu(
@@ -766,6 +915,7 @@ def run_host_mode() -> int:
                 on_toggle,
             ),
             pystray.MenuItem("Reconnect to Discord", on_reconnect),
+            pystray.MenuItem("Settings", settings_menu),
             pystray.MenuItem("Help", on_help),
             pystray.MenuItem("Dev", dev_menu),
             pystray.Menu.SEPARATOR,
@@ -876,6 +1026,44 @@ def main() -> int:
     if _should_spawn_new_console(args):
         log.info("Re-launching in a dedicated console window")
         return _spawn_in_new_console(args)
+
+    if "--version" in args:
+        print(f"{APP_NAME} {APP_VERSION}")
+        return 0
+
+    if "--help" in args or "-h" in args:
+        print(_USAGE)
+        return 0
+
+    unknown = [a for a in args if a.startswith("-") and a not in _KNOWN_FLAGS]
+    if unknown:
+        # A mistyped flag must not silently fall through to host mode.
+        print(f"Unknown option: {unknown[0]}\n\n{_USAGE}")
+        _msgbox(f"Unknown option: {unknown[0]}\n\nRun with --help for available options.")
+        return 2
+
+    if "--unregister-uri" in args:
+        # Handled before the automatic re-registration below, or the handlers
+        # would be recreated in the same breath they're removed.
+        from utils import unregister_protocols
+
+        cid = EMBEDDED_CLIENT_ID
+        try:
+            from config import CLIENT_ID as _uc
+
+            if _uc and str(_uc) != PLACEHOLDER_CLIENT_ID:
+                cid = str(_uc)
+        except Exception:
+            pass
+        ok = unregister_protocols(cid)
+        msg = (
+            "Listen Along link handlers were removed for this Windows account."
+            if ok
+            else "Some link handlers could not be removed."
+        )
+        log.info(msg)
+        _msgbox(msg, "Listen Along", info=ok)
+        return 0 if ok else 1
 
     try:
         from utils import register_uri_scheme

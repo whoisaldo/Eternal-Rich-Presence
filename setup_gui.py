@@ -50,26 +50,32 @@ def _write_config(
     sp_id: str,
     sp_secret: str,
     sp_redirect: str,
+    auto_accept: Optional[bool] = None,
+    cover_upload: Optional[bool] = None,
     cfg_path: Optional[str] = None,
 ) -> str:
     """Write config.py and return the file path.
 
     Rendering goes through utils.render_config — repr-escaped values and the
-    full canonical key set — and settings the GUI doesn't edit are preserved
-    from the existing file (rewriting used to silently reset the
-    AUTO_ACCEPT_JOIN_REQUESTS / COVER_ART_UPLOAD privacy toggles). The write
-    is atomic, so a failure mid-save can't leave a truncated config.py.
+    full canonical key set. The privacy toggles come from the GUI checkboxes;
+    when None they are preserved from the existing file (rewriting used to
+    silently reset them). The write is atomic, so a failure mid-save can't
+    leave a truncated config.py.
     """
     cfg_path = cfg_path or config_path()
     existing = read_config_values(cfg_path)
+    if auto_accept is None:
+        auto_accept = existing["AUTO_ACCEPT_JOIN_REQUESTS"]
+    if cover_upload is None:
+        cover_upload = existing["COVER_ART_UPLOAD"]
     content = render_config(
         client_id=client_id,
         asset_key=asset_key,
         spotify_client_id=sp_id,
         spotify_client_secret=sp_secret,
         spotify_redirect_uri=sp_redirect,
-        auto_accept_join_requests=existing["AUTO_ACCEPT_JOIN_REQUESTS"],
-        cover_art_upload=existing["COVER_ART_UPLOAD"],
+        auto_accept_join_requests=auto_accept,
+        cover_art_upload=cover_upload,
     )
     write_config_file(content, cfg_path)
     log.info("config.py saved at %s", cfg_path)
@@ -368,6 +374,56 @@ def run_setup_gui() -> bool:
         pady=5,
     ).pack(side="left", padx=(10, 0))
 
+    privacy_values = read_config_values()
+    auto_accept_var = tk.BooleanVar(value=privacy_values["AUTO_ACCEPT_JOIN_REQUESTS"])
+    cover_upload_var = tk.BooleanVar(value=privacy_values["COVER_ART_UPLOAD"])
+
+    privacy_card = tk.Frame(
+        content, bg=_BG_FIELD, highlightthickness=1, highlightbackground=_ENTRY_BORDER
+    )
+    privacy_card.pack(fill="x", padx=30, pady=(0, 12))
+
+    tk.Label(
+        privacy_card,
+        text="Privacy",
+        font=label_font,
+        fg=_ACCENT,
+        bg=_BG_FIELD,
+        anchor="w",
+    ).pack(fill="x", padx=16, pady=(14, 2))
+    tk.Label(
+        privacy_card,
+        text=(
+            "These control what leaves your machine. Album art is uploaded to a "
+            "public image host so Discord can display it; join requests come from "
+            "anyone who clicks Join on your presence."
+        ),
+        font=small_font,
+        fg=_FG_DIM,
+        bg=_BG_FIELD,
+        justify="left",
+        wraplength=530,
+        anchor="w",
+    ).pack(fill="x", padx=16, pady=(0, 8))
+
+    def _privacy_check(text: str, variable: tk.BooleanVar) -> None:
+        tk.Checkbutton(
+            privacy_card,
+            text=text,
+            variable=variable,
+            bg=_BG_FIELD,
+            fg=_FG,
+            activebackground=_BG_FIELD,
+            activeforeground=_FG,
+            selectcolor=_BG_FIELD,
+            highlightthickness=0,
+            font=small_font,
+        ).pack(anchor="w", padx=16, pady=(0, 4))
+
+    _privacy_check("Upload album art to a public host (live cover art)", cover_upload_var)
+    _privacy_check('Auto-accept Discord "Listen Along" join requests', auto_accept_var)
+    tk.Frame(privacy_card, bg=_BG_FIELD, height=8).pack()
+
     tray_hint = tk.Label(
         content,
         text=(
@@ -427,6 +483,8 @@ def run_setup_gui() -> bool:
                 sp_id=sp_id,
                 sp_secret=sp_secret,
                 sp_redirect=sp_redirect,
+                auto_accept=auto_accept_var.get(),
+                cover_upload=cover_upload_var.get(),
             )
             saved[0] = True
             root.destroy()
