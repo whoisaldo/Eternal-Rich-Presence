@@ -47,6 +47,7 @@ def _multipart_post(
     content_type: str,
     filename: str,
     validate: Callable[[str], bool],
+    timeout: float = 10.0,
 ) -> Optional[str]:
     """POST a multipart/form-data request with one file part.
 
@@ -78,7 +79,7 @@ def _multipart_post(
     req = urllib.request.Request(url, data=b"".join(parts), method="POST")
     req.add_header("Content-Type", "multipart/form-data; boundary=" + boundary.decode())
     req.add_header("User-Agent", _UPLOAD_USER_AGENT)
-    with urllib.request.urlopen(req, timeout=10) as resp:
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         result = resp.read().decode().strip()
     if result and validate(result):
         return result
@@ -131,6 +132,8 @@ def upload_cover_art(thumbnail_bytes: bytes) -> Optional[str]:
 
     for host in _UPLOAD_HOSTS:
         try:
+            # Short per-host timeout: this runs on the poll thread, and three
+            # dead hosts at 10s each used to stall presence updates for ~30s.
             url = _multipart_post(
                 host["url"],
                 host["fields"],
@@ -139,6 +142,7 @@ def upload_cover_art(thumbnail_bytes: bytes) -> Optional[str]:
                 content_type,
                 filename,
                 host["validate"],
+                timeout=6.0,
             )
             if url:
                 log.debug("Cover uploaded via %s: %s", host["name"], url)

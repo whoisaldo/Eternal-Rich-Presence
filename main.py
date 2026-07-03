@@ -474,7 +474,7 @@ def run_host_mode() -> int:
         while not stop_event.is_set():
             if not paused.is_set():
                 try:
-                    if dp._rpc is None:
+                    if not dp.is_connected:
                         try:
                             dp.connect()
                             log.info("Connected to Discord RPC")
@@ -482,12 +482,16 @@ def run_host_mode() -> int:
                             log.debug("Discord RPC connect retry failed: %s", e)
 
                     t = mgr.get_now_playing()
-                    if dp._rpc is not None:
+                    if dp.is_connected:
                         if t is None:
                             dp.clear()
                         else:
                             name = mgr.active_provider.name if mgr.active_provider else ""
                             dp.update(t, name)
+                            if paused.is_set():
+                                # Pause raced the in-flight update; undo it so
+                                # the presence doesn't stay stuck visible.
+                                dp.clear()
                     _refresh_tray_title(t)
                 except DiscordConnectionError as e:
                     log.warning("Discord connection dropped, retrying: %s", e)
@@ -546,7 +550,7 @@ def run_host_mode() -> int:
             return f"Source: {p.name}" if p else "Source: —"
 
         def _discord_status_label(_item):
-            return "Discord: Connected" if dp._rpc is not None else "Discord: Disconnected"
+            return "Discord: Connected" if dp.is_connected else "Discord: Disconnected"
 
         def _details_label(_item):
             return mgr.status_detail
@@ -567,7 +571,8 @@ def run_host_mode() -> int:
                 dp.clear()
                 dp.disconnect()
                 dp.connect()
-                paused.clear()
+                # Deliberately does NOT resume a paused session: a user who
+                # paused broadcasting for privacy keeps that choice.
                 log.info("Reconnected to Discord RPC")
             except Exception as e:
                 log.error("Reconnect failed: %s", e)
