@@ -20,7 +20,9 @@ ASSET_KEY = "apple_music"
 # Listen Along playback control requires Spotify Premium and an active Spotify device.
 SPOTIFY_CLIENT_ID = ""
 SPOTIFY_CLIENT_SECRET = ""
-SPOTIFY_REDIRECT_URI = "http://localhost:8888/callback"
+# Note: Spotify no longer accepts "localhost" for new apps — use an explicit
+# loopback IP (127.0.0.1) here and in your Spotify app's settings.
+SPOTIFY_REDIRECT_URI = "http://127.0.0.1:8888/callback"
 
 # Privacy: auto-accept Discord "Listen Along" join requests from anyone who
 # clicks Join on your Rich Presence. Set to False to ignore them.

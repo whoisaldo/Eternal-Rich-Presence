@@ -19,22 +19,22 @@ class TrackInfo:
     artist: str = "Unknown Artist"
     album: str = ""
     position_sec: Optional[int] = None
+    duration_sec: Optional[int] = None
     cover_art: Optional[bytes] = None
     is_playing: bool = True
 
 
 class BaseProvider(ABC):
-    """Interface that every music provider must implement."""
+    """Interface that every music provider must implement.
+
+    ProviderManager drives provider selection entirely off get_now_playing();
+    a provider signals "nothing to show" with None and may raise for a real
+    fault (the manager grace-handles one hiccup, then surfaces the error).
+    """
 
     @property
     @abstractmethod
     def name(self) -> str: ...
-
-    @abstractmethod
-    def is_available(self) -> bool:
-        # Reserved extension point. Currently unused — ProviderManager drives
-        # provider selection entirely off get_now_playing().
-        ...
 
     @abstractmethod
     def get_now_playing(self) -> Optional[TrackInfo]: ...

@@ -7,9 +7,10 @@
 # option) any later version. See <https://www.gnu.org/licenses/> for details.
 
 import asyncio
-import sys
+import concurrent.futures
 import threading
 import time
+from datetime import datetime
 from typing import Optional
 
 from logger import get_logger
@@ -17,31 +18,6 @@ from logger import get_logger
 from .base import BaseProvider, TrackInfo
 
 log = get_logger("erp.apple_music")
-
-# winrt on Python 3.13 fires "Event loop is closed" from a native callback
-# after asyncio.run() has already returned the data.  Suppress via every
-# hook Python exposes for unhandled/unraisable exceptions.
-_orig_threading_hook = threading.excepthook
-_orig_unraisable_hook = sys.unraisablehook
-
-
-def _quiet_threading_hook(args):
-    if args.exc_type is RuntimeError and "Event loop is closed" in str(args.exc_value):
-        return
-    _orig_threading_hook(args)
-
-
-def _quiet_unraisable_hook(unraisable):
-    if isinstance(unraisable.exc_value, RuntimeError) and "Event loop is closed" in str(
-        unraisable.exc_value
-    ):
-        return
-    _orig_unraisable_hook(unraisable)
-
-
-threading.excepthook = _quiet_threading_hook
-sys.unraisablehook = _quiet_unraisable_hook
-
 
 _WIN_EPOCH_OFFSET = 116444736000000000  # 100ns ticks between 1601-01-01 and 1970-01-01
 
@@ -59,17 +35,24 @@ def _smtc_elapsed_since_update(timeline) -> float:
 
     SMTC freezes ``position`` at the moment of the last state change.
     We compensate by adding wall-clock time that has passed since then.
+
+    Depending on the pywinrt version, ``last_updated_time`` projects either as
+    a timezone-aware ``datetime`` (current releases) or as a struct exposing
+    FILETIME ticks via ``universal_time`` (older releases) — handle both, or
+    the compensation silently returns 0 and the position freezes.
     """
     try:
         lut = getattr(timeline, "last_updated_time", None)
         if lut is None:
             return 0.0
-        filetime = getattr(lut, "universal_time", None)
-        if filetime is None or filetime == 0:
-            return 0.0
-        updated_unix = (filetime - _WIN_EPOCH_OFFSET) / 10_000_000
-        elapsed = time.time() - updated_unix
-        return max(0.0, elapsed)
+        if isinstance(lut, datetime):
+            updated_unix = lut.timestamp()
+        else:
+            filetime = getattr(lut, "universal_time", None)
+            if filetime is None or filetime == 0:
+                return 0.0
+            updated_unix = (filetime - _WIN_EPOCH_OFFSET) / 10_000_000
+        return max(0.0, time.time() - updated_unix)
     except Exception as e:
         log.debug("_smtc_elapsed_since_update: %s", e)
         return 0.0
@@ -81,59 +64,86 @@ class AppleMusicProvider(BaseProvider):
     or Windows SMTC (modern Apple Music / any system player).
     """
 
+    _ITUNES_REPROBE_INTERVAL = 30.0
+
     def __init__(self):
         self._itunes = None
-        self._use_smtc = False
-        self._smtc_thread = None
+        self._itunes_retry_at = 0.0
+        self._com_initialized = False
+        self._loop = None
+        self._loop_thread = None
         self._last_smtc = None
-        self._init_source()
+        self._thumb_cache = (None, None)  # (track key, bytes)
 
     @property
     def name(self) -> str:
         return "Apple Music"
 
-    def _init_source(self):
+    def _get_itunes(self):
+        """Attach to a *running* iTunes instance, never launching one.
+
+        Runs lazily on the polling thread so the COM proxy lives in the
+        apartment of the thread that actually uses it — creating it on the
+        main thread made every cross-thread call fail silently. GetActiveObject
+        only attaches to an existing process; Dispatch would boot iTunes.exe on
+        every app start for anyone who merely has it installed.
+        """
+        now = time.monotonic()
+        if now < self._itunes_retry_at:
+            return None
         try:
+            import pythoncom
             import win32com.client
-
-            self._itunes = win32com.client.Dispatch("iTunes.Application")
-            _ = self._itunes.CurrentTrack
-            log.debug("Using iTunes COM")
+        except ImportError:
+            self._itunes_retry_at = float("inf")
+            return None
+        try:
+            if not self._com_initialized:
+                pythoncom.CoInitialize()
+                self._com_initialized = True
+            itunes = win32com.client.GetActiveObject("iTunes.Application")
+            _ = itunes.CurrentTrack
+            log.debug("Attached to running iTunes via COM")
+            return itunes
         except Exception as e:
-            self._itunes = None
-            self._use_smtc = True
-            log.debug("iTunes COM unavailable (%s), using SMTC", e)
-
-    def is_available(self) -> bool:
-        if self._itunes is not None:
-            try:
-                _ = self._itunes.CurrentTrack
-                return True
-            except Exception as e:
-                log.debug("iTunes is_available check failed: %s", e)
-                return False
-        return self._poll_smtc() is not None
+            log.debug("iTunes COM not available (%s); re-probing later", e)
+            self._itunes_retry_at = now + self._ITUNES_REPROBE_INTERVAL
+            return None
 
     def get_now_playing(self) -> Optional[TrackInfo]:
-        if self._itunes is not None:
-            return self._poll_itunes()
+        # iTunes COM first (richer data for legacy users), SMTC otherwise. A
+        # dead or absent iTunes falls straight through to SMTC in the same
+        # poll instead of blanking the presence until an app restart.
+        track = self._poll_itunes()
+        if track is not None:
+            return track
         return self._poll_smtc()
 
     def _poll_itunes(self) -> Optional[TrackInfo]:
+        if self._itunes is None:
+            self._itunes = self._get_itunes()
+        if self._itunes is None:
+            return None
         try:
             track = self._itunes.CurrentTrack
             if track is None:
                 return None
             state = int(getattr(self._itunes, "PlayerState", 0) or 0)
+            duration = int(getattr(track, "Duration", 0) or 0)
             return TrackInfo(
                 title=getattr(track, "Name", None) or "Unknown",
                 artist=getattr(track, "Artist", None) or "Unknown Artist",
                 album=getattr(track, "Album", None) or "",
                 position_sec=getattr(self._itunes, "PlayerPosition", 0) or 0,
+                duration_sec=duration or None,
                 is_playing=(state == 1),
             )
         except Exception as e:
-            log.debug("iTunes _poll_itunes: %s", e)
+            # iTunes quit or the COM link died: drop the handle so SMTC takes
+            # over on this very poll, and re-probe for iTunes later.
+            log.debug("iTunes COM poll failed (%s); falling back to SMTC", e)
+            self._itunes = None
+            self._itunes_retry_at = time.monotonic() + self._ITUNES_REPROBE_INTERVAL
             return None
 
     def _poll_smtc(self) -> Optional[TrackInfo]:
@@ -147,15 +157,20 @@ class AppleMusicProvider(BaseProvider):
         async def _fetch():
             try:
                 manager = await MediaManager.request_async()
-                session = manager.get_current_session()
-                sessions = [session] if session else []
-                if not sessions:
-                    try:
-                        all_s = manager.get_sessions()
-                        if all_s:
-                            sessions = list(all_s)
-                    except Exception as e:
-                        log.debug("SMTC get_sessions: %s", e)
+                # Always enumerate every session: when another app (browser
+                # video, a game) owns the "current" session, the playing Apple
+                # Music session only shows up in the full list. The current
+                # session goes first for priority; seen_ids dedups it below.
+                sessions = []
+                try:
+                    all_s = manager.get_sessions()
+                    if all_s:
+                        sessions = list(all_s)
+                except Exception as e:
+                    log.debug("SMTC get_sessions: %s", e)
+                current = manager.get_current_session()
+                if current is not None:
+                    sessions.insert(0, current)
 
                 paused_candidate = None
                 seen_ids = set()
@@ -187,24 +202,41 @@ class AppleMusicProvider(BaseProvider):
                         album = (getattr(props, "album_title", "") or "").strip()
 
                         pos_sec = None
+                        duration_sec = None
                         try:
                             timeline = s.get_timeline_properties()
                             if timeline:
                                 pos = getattr(timeline, "position", None)
                                 if pos is not None and hasattr(pos, "total_seconds"):
                                     raw_sec = pos.total_seconds()
-                                    elapsed = _smtc_elapsed_since_update(timeline)
+                                    # Only compensate while playing: a paused
+                                    # track's position must not keep advancing.
+                                    elapsed = 0.0
+                                    if playback_status_value == _PLAYBACK_PLAYING:
+                                        elapsed = _smtc_elapsed_since_update(timeline)
                                     pos_sec = int(raw_sec + elapsed)
+                                end = getattr(timeline, "end_time", None)
+                                if end is not None and hasattr(end, "total_seconds"):
+                                    duration_sec = int(end.total_seconds()) or None
                         except Exception as e:
                             log.debug("SMTC timeline/position: %s", e)
 
-                        thumbnail_bytes = await self._read_thumbnail(props)
+                        # Re-reading the (up to 2 MiB) thumbnail stream every
+                        # poll is wasted work while the track is unchanged.
+                        cache_key = (app_id, title, artist, album)
+                        if self._thumb_cache[0] == cache_key:
+                            thumbnail_bytes = self._thumb_cache[1]
+                        else:
+                            thumbnail_bytes = await self._read_thumbnail(props)
+                            if thumbnail_bytes is not None:
+                                self._thumb_cache = (cache_key, thumbnail_bytes)
 
                         track_info = TrackInfo(
                             title=title,
                             artist=artist,
                             album=album,
                             position_sec=pos_sec,
+                            duration_sec=duration_sec,
                             cover_art=thumbnail_bytes,
                             is_playing=(playback_status_value == _PLAYBACK_PLAYING),
                         )
@@ -220,30 +252,39 @@ class AppleMusicProvider(BaseProvider):
                 log.debug("SMTC _fetch: %s", e)
                 return None
 
-        # Don't pile up stuck worker threads if a winrt call ever hangs past the
-        # join timeout: skip this poll while a prior fetch is still running, and
-        # fall back to the last known state instead of a spurious None.
-        if self._smtc_thread is not None and self._smtc_thread.is_alive():
-            log.debug("Previous SMTC fetch still running; skipping this poll")
-            return self._last_smtc
-
-        result = [None]
-
-        def _run_in_thread():
-            try:
-                result[0] = asyncio.run(_fetch())
-            except Exception as e:
-                log.debug("SMTC fetch error: %s", e)
-
-        t = threading.Thread(target=_run_in_thread, daemon=True)
-        self._smtc_thread = t
-        t.start()
-        t.join(timeout=5)
-        if t.is_alive():
+        # One persistent loop thread services every SMTC fetch. Building and
+        # tearing down an event loop per 5s poll was constant churn and made
+        # winrt's native callbacks fire "Event loop is closed" errors (which
+        # used to be papered over by monkeypatching the global exception
+        # hooks). A hung fetch just times out here and queues behind.
+        try:
+            loop = self._ensure_loop()
+        except Exception as e:
+            log.debug("SMTC loop unavailable: %s", e)
+            return None
+        future = asyncio.run_coroutine_threadsafe(_fetch(), loop)
+        try:
+            result = future.result(timeout=5)
+        except concurrent.futures.TimeoutError:
+            future.cancel()
             log.debug("SMTC fetch exceeded 5s; returning last known state")
             return self._last_smtc
-        self._last_smtc = result[0]
-        return result[0]
+        except Exception as e:
+            log.debug("SMTC fetch error: %s", e)
+            return None
+        self._last_smtc = result
+        return result
+
+    def _ensure_loop(self):
+        thread_alive = self._loop_thread is not None and self._loop_thread.is_alive()
+        if self._loop is not None and thread_alive:
+            return self._loop
+        self._loop = asyncio.new_event_loop()
+        self._loop_thread = threading.Thread(
+            target=self._loop.run_forever, daemon=True, name="smtc-loop"
+        )
+        self._loop_thread.start()
+        return self._loop
 
     @staticmethod
     async def _read_thumbnail(props) -> Optional[bytes]:
@@ -257,10 +298,16 @@ class AppleMusicProvider(BaseProvider):
                 from winrt.windows.storage.streams import Buffer, InputStreamOptions
 
                 stream = await thumb_ref.open_read_async()
-                buf = Buffer(2 * 1024 * 1024)
-                await stream.read_async(buf, buf.capacity, InputStreamOptions.READ_AHEAD)
-                n = getattr(buf, "length", buf.capacity)
-                return bytes(bytearray(buf)[:n])
+                try:
+                    buf = Buffer(2 * 1024 * 1024)
+                    await stream.read_async(buf, buf.capacity, InputStreamOptions.READ_AHEAD)
+                    n = getattr(buf, "length", buf.capacity)
+                    return bytes(bytearray(buf)[:n])
+                finally:
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
 
             return await asyncio.wait_for(_do_read(), timeout=3)
         except (asyncio.TimeoutError, asyncio.CancelledError) as e:

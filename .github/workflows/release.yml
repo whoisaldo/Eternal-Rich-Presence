@@ -8,8 +8,31 @@ permissions:
   contents: write
 
 jobs:
+  test:
+    name: Release gate (lint + tests + version check)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install runtime deps + tooling
+        run: python -m pip install --upgrade pip pytest ruff==0.15.18 -r requirements.txt
+      - name: Ruff lint
+        run: ruff check .
+      - name: Pytest
+        run: pytest -q
+      - name: Check tag matches app_info.APP_VERSION
+        shell: pwsh
+        run: |
+          $v = (python -c "from app_info import APP_VERSION; print(APP_VERSION)").Trim()
+          if ("v$v" -ne "${{ github.ref_name }}") {
+            throw "Tag ${{ github.ref_name }} does not match app_info.APP_VERSION ($v)"
+          }
+
   build-release:
     name: Build exe + publish release
+    needs: test
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,6 +45,11 @@ jobs:
         # source of truth for the exe and are intentionally not overridden here.
         shell: pwsh
         run: .\build.ps1
+      - name: Generate SHA256 checksums
+        shell: pwsh
+        run: |
+          $h = Get-FileHash EternalRichPresence.exe -Algorithm SHA256
+          "$($h.Hash)  EternalRichPresence.exe" | Set-Content SHA256SUMS.txt -Encoding ASCII
       - name: Extract release notes from CHANGELOG.md
         shell: pwsh
         run: |
@@ -36,7 +64,11 @@ jobs:
           if (-not $out) { $out = @("Release ${{ github.ref_name }}") }
           Set-Content -Path release_notes.md -Value $out -Encoding UTF8
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        # Pinned by commit SHA (tag v2): this workflow has contents:write and
+        # publishes user-facing binaries, so mutable action refs are out.
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          files: EternalRichPresence.exe
+          files: |
+            EternalRichPresence.exe
+            SHA256SUMS.txt
           body_path: release_notes.md

@@ -1,10 +1,15 @@
-# Optional: only the legacy iTunes COM now-playing path uses pywin32. Modern
-# Apple Music (Windows SMTC) and Spotify work without it.
-pywin32>=306
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Windows-only packages carry platform markers so `pip install -r` also works
+# on the Linux CI runner and non-Windows dev machines (pure-logic tests only).
+
+# pywin32 powers the legacy iTunes COM now-playing path; modern Apple Music
+# (Windows SMTC) and Spotify work without it, but it ships in every Windows
+# install so the COM path works out of the box.
+pywin32>=306; sys_platform == "win32"
 pypresence>=4.2.0
 spotipy>=2.23.0
 pystray>=0.19.5
 Pillow>=10.0.0
-winrt-Windows.Foundation>=3.0
-winrt-Windows.Media.Control>=3.0
-winrt-Windows.Storage.Streams>=3.0
+winrt-Windows.Foundation>=3.0; sys_platform == "win32"
+winrt-Windows.Media.Control>=3.0; sys_platform == "win32"
+winrt-Windows.Storage.Streams>=3.0; sys_platform == "win32"

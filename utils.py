@@ -13,10 +13,140 @@ import urllib.parse
 import urllib.request
 from typing import Callable, Optional
 
-from app_info import APP_NAME
+from app_info import (
+    APP_NAME,
+    DEFAULT_ASSET_KEY,
+    DEFAULT_SPOTIFY_REDIRECT_URI,
+    config_path,
+)
 from logger import get_logger
 
 log = get_logger("erp.utils")
+
+# ---------------------------------------------------------------------------
+# config.py rendering — the ONE place that knows the full key set.
+# Three hand-maintained templates (config.example.py, main's default writer,
+# the setup GUI's writer) previously drifted apart: the GUI silently dropped
+# the privacy toggles on every save. Every writer now goes through here.
+# ---------------------------------------------------------------------------
+
+_CONFIG_DEFAULTS = {
+    "CLIENT_ID": "",
+    "ASSET_KEY": DEFAULT_ASSET_KEY,
+    "SPOTIFY_CLIENT_ID": "",
+    "SPOTIFY_CLIENT_SECRET": "",
+    "SPOTIFY_REDIRECT_URI": DEFAULT_SPOTIFY_REDIRECT_URI,
+    "AUTO_ACCEPT_JOIN_REQUESTS": True,
+    "COVER_ART_UPLOAD": True,
+}
+
+
+def render_config(
+    client_id: str,
+    asset_key: str = DEFAULT_ASSET_KEY,
+    spotify_client_id: str = "",
+    spotify_client_secret: str = "",
+    spotify_redirect_uri: str = DEFAULT_SPOTIFY_REDIRECT_URI,
+    auto_accept_join_requests: bool = True,
+    cover_art_upload: bool = True,
+) -> str:
+    """Render the canonical config.py contents.
+
+    Values are emitted with ``repr()`` so a quote/backslash/newline in any
+    user-facing field becomes a safe Python literal instead of corrupting the
+    file (a project guardrail).
+    """
+    redirect = str(spotify_redirect_uri).strip() or DEFAULT_SPOTIFY_REDIRECT_URI
+    return (
+        "# Discord application Client ID (uses built-in if set).\n"
+        f"CLIENT_ID = {str(client_id).strip()!r}\n"
+        "\n"
+        "# Rich Presence art asset key (Dev Portal > Rich Presence > Art Assets).\n"
+        f"ASSET_KEY = {(str(asset_key).strip() or DEFAULT_ASSET_KEY)!r}\n"
+        "\n"
+        "# Spotify Web API credentials (leave empty to disable Spotify).\n"
+        f"SPOTIFY_CLIENT_ID = {str(spotify_client_id).strip()!r}\n"
+        f"SPOTIFY_CLIENT_SECRET = {str(spotify_client_secret).strip()!r}\n"
+        f"SPOTIFY_REDIRECT_URI = {redirect!r}\n"
+        "\n"
+        '# Privacy: auto-accept Discord "Listen Along" join requests.\n'
+        "# Set to False to ignore join requests from people who click Join.\n"
+        f"AUTO_ACCEPT_JOIN_REQUESTS = {bool(auto_accept_join_requests)!r}\n"
+        "\n"
+        "# Privacy: upload album art to a public host so Discord can show it.\n"
+        "# Set to False to use the static app icon instead.\n"
+        f"COVER_ART_UPLOAD = {bool(cover_art_upload)!r}\n"
+    )
+
+
+def read_config_values(path: Optional[str] = None) -> dict:
+    """Tolerantly read config.py, returning defaults for anything missing or
+    broken. Used to preserve settings (e.g. the privacy toggles) across
+    rewrites and to prefill the setup GUI."""
+    values = dict(_CONFIG_DEFAULTS)
+    path = path or config_path()
+    if not os.path.isfile(path):
+        return values
+    ns: dict = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            exec(compile(f.read(), path, "exec"), ns)
+    except Exception as e:
+        log.warning("config.py could not be read (%s); using defaults", e)
+        return values
+    for key, default in _CONFIG_DEFAULTS.items():
+        if key in ns and ns[key] is not None:
+            values[key] = bool(ns[key]) if isinstance(default, bool) else str(ns[key])
+    return values
+
+
+def update_config_values(path: Optional[str] = None, **changes) -> str:
+    """Rewrite config.py with ``changes`` applied on top of current values.
+
+    Backs the tray quick-toggles: everything not being changed round-trips
+    through read_config_values, so no key is ever silently dropped."""
+    values = read_config_values(path)
+    for key, val in changes.items():
+        if key not in _CONFIG_DEFAULTS:
+            raise KeyError(f"Unknown config key: {key}")
+        values[key] = val
+    content = render_config(
+        client_id=values["CLIENT_ID"],
+        asset_key=values["ASSET_KEY"],
+        spotify_client_id=values["SPOTIFY_CLIENT_ID"],
+        spotify_client_secret=values["SPOTIFY_CLIENT_SECRET"],
+        spotify_redirect_uri=values["SPOTIFY_REDIRECT_URI"],
+        auto_accept_join_requests=values["AUTO_ACCEPT_JOIN_REQUESTS"],
+        cover_art_upload=values["COVER_ART_UPLOAD"],
+    )
+    return write_config_file(content, path)
+
+
+def write_config_file(content: str, path: Optional[str] = None) -> str:
+    """Atomically write config.py (temp file + rename), returning its path.
+
+    A crash mid-write must never leave a truncated config.py behind."""
+    path = path or config_path()
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        f.write(content)
+    os.replace(tmp_path, path)
+    return path
+
+
+def resource_path(name: str) -> Optional[str]:
+    """Locate a bundled resource: PyInstaller _MEIPASS first, then beside the
+    exe, then the source tree. Returns None if the file doesn't exist."""
+    if getattr(sys, "frozen", False):
+        meipass = os.path.join(getattr(sys, "_MEIPASS", ""), name)
+        if os.path.isfile(meipass):
+            return meipass
+        beside = os.path.join(os.path.dirname(os.path.abspath(sys.executable)), name)
+        if os.path.isfile(beside):
+            return beside
+    src = os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
+    return src if os.path.isfile(src) else None
+
 
 # catbox/litterbox reject some non-browser User-Agents, so uploads use a
 # browser-like UA. 0x0 accepts anything; keeping it uniform avoids three copies.
@@ -47,6 +177,7 @@ def _multipart_post(
     content_type: str,
     filename: str,
     validate: Callable[[str], bool],
+    timeout: float = 10.0,
 ) -> Optional[str]:
     """POST a multipart/form-data request with one file part.
 
@@ -78,15 +209,17 @@ def _multipart_post(
     req = urllib.request.Request(url, data=b"".join(parts), method="POST")
     req.add_header("Content-Type", "multipart/form-data; boundary=" + boundary.decode())
     req.add_header("User-Agent", _UPLOAD_USER_AGENT)
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        result = resp.read().decode().strip()
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        # The response should be one short URL; cap the read so a misbehaving
+        # host can't balloon memory.
+        result = resp.read(1024).decode(errors="replace").strip()
     if result and validate(result):
         return result
     return None
 
 
 def _valid_url(url: str, must_contain: str = "") -> bool:
-    return url.startswith("http") and len(url) < 500 and (must_contain in url)
+    return url.startswith(("http://", "https://")) and len(url) < 500 and (must_contain in url)
 
 
 # Cover-art upload hosts, tried in order. Expiring hosts come first so that
@@ -131,6 +264,8 @@ def upload_cover_art(thumbnail_bytes: bytes) -> Optional[str]:
 
     for host in _UPLOAD_HOSTS:
         try:
+            # Short per-host timeout: this runs on the poll thread, and three
+            # dead hosts at 10s each used to stall presence updates for ~30s.
             url = _multipart_post(
                 host["url"],
                 host["fields"],
@@ -139,6 +274,7 @@ def upload_cover_art(thumbnail_bytes: bytes) -> Optional[str]:
                 content_type,
                 filename,
                 host["validate"],
+                timeout=6.0,
             )
             if url:
                 log.debug("Cover uploaded via %s: %s", host["name"], url)
@@ -160,7 +296,10 @@ def _encode_within(text: str, max_encoded_len: int) -> str:
         return ""
     encoded = ""
     for ch in text:
-        piece = urllib.parse.quote(ch, safe="")
+        # errors="replace": a lone UTF-16 surrogate in provider metadata must
+        # degrade to "?" instead of raising UnicodeEncodeError and killing the
+        # presence update for the whole track.
+        piece = urllib.parse.quote(ch, safe="", errors="replace")
         if len(encoded) + len(piece) > max_encoded_len:
             break
         encoded += piece
@@ -213,10 +352,12 @@ def parse_join_secret(uri: str) -> tuple[Optional[dict], Optional[str]]:
         return None, "missing_track"
 
     _, query = payload.split("?", 1)
+    # parse_qs already percent-decodes values; decoding a second time corrupted
+    # titles containing literal %XX sequences ("100%25 off" became "100% off").
     params = urllib.parse.parse_qs(query, keep_blank_values=True)
 
-    track = urllib.parse.unquote((params.get("track") or [""])[0]).strip()
-    artist = urllib.parse.unquote((params.get("artist") or [""])[0]).strip()
+    track = ((params.get("track") or [""])[0]).strip()
+    artist = ((params.get("artist") or [""])[0]).strip()
     raw_pos = (params.get("pos") or ["0"])[0]
 
     try:
@@ -234,8 +375,22 @@ def parse_join_secret(uri: str) -> tuple[Optional[dict], Optional[str]]:
     }, None
 
 
-def register_uri_scheme(exe_path: Optional[str] = None, silent: bool = False) -> bool:
-    """Register the eternalrp:// protocol handler for the current Windows user."""
+def _protocol_command(exe_path: Optional[str] = None) -> str:
+    """Build the shell command a protocol handler should invoke.
+
+    When running from source, the interpreter alone would swallow the URI
+    (python.exe would try to execute it as a script), so the entry script is
+    included — mirroring how _restart_self relaunches the app."""
+    if exe_path:
+        return f'"{os.path.abspath(exe_path)}" "%1"'
+    if getattr(sys, "frozen", False):
+        return f'"{os.path.abspath(sys.executable)}" "%1"'
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.py")
+    return f'"{os.path.abspath(sys.executable)}" "{script}" "%1"'
+
+
+def _register_protocol(protocol: str, exe_path: Optional[str], silent: bool) -> bool:
+    """Register a URL protocol handler under HKCU (no admin required)."""
     try:
         import winreg
     except ImportError:
@@ -243,24 +398,26 @@ def register_uri_scheme(exe_path: Optional[str] = None, silent: bool = False) ->
             print("Registry access requires Windows.", file=sys.stderr)
         return False
 
-    cmd = os.path.abspath(exe_path or sys.executable)
-    command = f'"{cmd}" "%1"'
-
+    command = _protocol_command(exe_path)
     try:
-        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"SOFTWARE\Classes\eternalrp") as k:
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"SOFTWARE\Classes\{protocol}") as k:
             winreg.SetValueEx(k, None, 0, winreg.REG_SZ, f"URL:{APP_NAME}")
             winreg.SetValueEx(k, "URL Protocol", 0, winreg.REG_SZ, "")
         with winreg.CreateKey(
-            winreg.HKEY_CURRENT_USER,
-            r"SOFTWARE\Classes\eternalrp\shell\open\command",
+            winreg.HKEY_CURRENT_USER, rf"SOFTWARE\Classes\{protocol}\shell\open\command"
         ) as k:
             winreg.SetValueEx(k, None, 0, winreg.REG_SZ, command)
         return True
     except OSError as e:
-        log.warning("URI registration failed: %s", e)
+        log.warning("%s:// registration failed: %s", protocol, e)
         if not silent:
-            print(f"URI registration failed: {e}", file=sys.stderr)
+            print(f"{protocol}:// registration failed: {e}", file=sys.stderr)
         return False
+
+
+def register_uri_scheme(exe_path: Optional[str] = None, silent: bool = False) -> bool:
+    """Register the eternalrp:// protocol handler for the current Windows user."""
+    return _register_protocol("eternalrp", exe_path, silent)
 
 
 def register_discord_launch(
@@ -271,29 +428,94 @@ def register_discord_launch(
     This is the mechanism Discord uses when a user clicks "Join" on someone's
     Rich Presence.  Discord opens ``discord-{client_id}://join/{secret}`` and
     the OS launches the registered command with the URL as an argument.
-
-    Written to HKCU (no admin required).
     """
+    return _register_protocol(f"discord-{client_id}", exe_path, silent)
+
+
+def _delete_key_tree(root, subkey: str) -> None:
+    """Delete a registry key and all of its subkeys (winreg has no recursive
+    delete). Missing keys are fine."""
+    import winreg
+
+    try:
+        with winreg.OpenKey(root, subkey) as key:
+            while True:
+                try:
+                    child = winreg.EnumKey(key, 0)
+                except OSError:
+                    break
+                _delete_key_tree(root, rf"{subkey}\{child}")
+    except FileNotFoundError:
+        return
+    try:
+        winreg.DeleteKey(root, subkey)
+    except FileNotFoundError:
+        pass
+
+
+def unregister_protocols(client_id: str = "") -> bool:
+    """Remove the HKCU protocol handlers — the only uninstall story a portable
+    exe has. Otherwise a deleted exe leaves dead eternalrp:// / discord-<id>://
+    handlers that break every Listen Along link the user clicks."""
     try:
         import winreg
     except ImportError:
         return False
 
-    cmd = os.path.abspath(exe_path or sys.executable)
-    command = f'"{cmd}" "%1"'
-    protocol = f"discord-{client_id}"
+    ok = True
+    protocols = ["eternalrp"]
+    if client_id:
+        protocols.append(f"discord-{client_id}")
+    for protocol in protocols:
+        try:
+            _delete_key_tree(winreg.HKEY_CURRENT_USER, rf"SOFTWARE\Classes\{protocol}")
+        except OSError as e:
+            log.warning("Unregistering %s:// failed: %s", protocol, e)
+            ok = False
+    return ok
 
+
+_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+
+
+def _autostart_command() -> str:
+    if getattr(sys, "frozen", False):
+        return f'"{os.path.abspath(sys.executable)}"'
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.py")
+    return f'"{os.path.abspath(sys.executable)}" "{script}"'
+
+
+def set_autostart(enabled: bool) -> bool:
+    """Enable/disable launch at Windows sign-in via the HKCU Run key.
+
+    HKCU keeps the no-elevation guardrail intact — no UAC prompt, ever."""
     try:
-        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"SOFTWARE\Classes\{protocol}") as k:
-            winreg.SetValueEx(k, None, 0, winreg.REG_SZ, "URL:Run EternalRichPresence")
-            winreg.SetValueEx(k, "URL Protocol", 0, winreg.REG_SZ, "")
-        with winreg.CreateKey(
-            winreg.HKEY_CURRENT_USER, rf"SOFTWARE\Classes\{protocol}\shell\open\command"
-        ) as k:
-            winreg.SetValueEx(k, None, 0, winreg.REG_SZ, command)
+        import winreg
+    except ImportError:
+        return False
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
+            if enabled:
+                winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, _autostart_command())
+            else:
+                try:
+                    winreg.DeleteValue(key, APP_NAME)
+                except FileNotFoundError:
+                    pass
         return True
     except OSError as e:
-        log.warning("Discord protocol registration failed: %s", e)
-        if not silent:
-            print(f"Discord protocol registration failed: {e}", file=sys.stderr)
+        log.warning("Autostart update failed: %s", e)
+        return False
+
+
+def is_autostart_enabled() -> bool:
+    try:
+        import winreg
+    except ImportError:
+        return False
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY) as key:
+            winreg.QueryValueEx(key, APP_NAME)
+        return True
+    except OSError:
         return False
