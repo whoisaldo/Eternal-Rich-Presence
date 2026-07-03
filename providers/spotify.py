@@ -8,10 +8,12 @@
 
 import os
 import re
+import tempfile
+import threading
 import urllib.request
 from typing import Optional
 
-from app_info import APP_NAME, DEFAULT_SPOTIFY_REDIRECT_URI, app_root
+from app_info import APP_NAME, DEFAULT_SPOTIFY_REDIRECT_URI
 from logger import get_logger
 
 from .base import BaseProvider, TrackInfo
@@ -46,7 +48,8 @@ class SpotifyProvider(BaseProvider):
 
     def _token_cache_path(self) -> str:
         # Prefer a per-user location (not synced by OneDrive, not next to a
-        # possibly shared exe); fall back to the app root if unavailable.
+        # possibly shared exe). The token is a secret, so never fall back to
+        # the app dir — use the per-user temp dir if LOCALAPPDATA is unusable.
         base = os.environ.get("LOCALAPPDATA", "")
         if base:
             cache_dir = os.path.join(base, APP_NAME)
@@ -55,7 +58,9 @@ class SpotifyProvider(BaseProvider):
                 return os.path.join(cache_dir, ".spotify_token_cache")
             except OSError as e:
                 log.debug("LOCALAPPDATA cache dir unavailable: %s", e)
-        return os.path.join(app_root(), ".spotify_token_cache")
+        fallback_dir = os.path.join(tempfile.gettempdir(), APP_NAME)
+        os.makedirs(fallback_dir, exist_ok=True)
+        return os.path.join(fallback_dir, ".spotify_token_cache")
 
     def _init_client(self):
         if not self._client_id or not self._client_secret:
@@ -63,6 +68,7 @@ class SpotifyProvider(BaseProvider):
             return
         try:
             import spotipy
+            from spotipy.cache_handler import CacheFileHandler
             from spotipy.oauth2 import SpotifyOAuth
 
             auth = SpotifyOAuth(
@@ -70,16 +76,50 @@ class SpotifyProvider(BaseProvider):
                 client_secret=self._client_secret,
                 redirect_uri=self._redirect_uri,
                 scope=self.SCOPES,
-                cache_path=self._token_cache_path(),
+                cache_handler=CacheFileHandler(cache_path=self._token_cache_path()),
                 open_browser=True,
             )
-            self._sp = spotipy.Spotify(auth_manager=auth)
-            self.last_error = None
-            log.debug("Spotify client initialized")
+            cached = None
+            try:
+                cached = auth.validate_token(auth.cache_handler.get_cached_token())
+            except Exception as e:
+                log.debug("Spotify cached-token validation failed: %s", e)
+            if cached:
+                self._sp = spotipy.Spotify(auth_manager=auth)
+                self.last_error = None
+                log.debug("Spotify client initialized from cached token")
+                return
+            # No usable token yet. The interactive browser flow blocks until
+            # the user finishes it, so never run it on the caller's thread
+            # (the poll loop would freeze and take Apple Music down with it) —
+            # authorize on a daemon worker and come online when it completes.
+            self.last_error = "auth_pending"
+            threading.Thread(
+                target=self._interactive_auth,
+                args=(auth,),
+                daemon=True,
+                name="spotify-oauth",
+            ).start()
         except Exception as e:
             self._sp = None
             self.last_error = "init_failed"
             log.warning("Spotify init failed: %s", e)
+
+    def _interactive_auth(self, auth):
+        try:
+            import spotipy
+
+            log.info("Spotify authorization required — complete the sign-in in your browser")
+            token = auth.get_access_token(as_dict=False)
+            if token:
+                self._sp = spotipy.Spotify(auth_manager=auth)
+                self.last_error = None
+                log.info("Spotify authorized")
+            else:
+                self.last_error = "init_failed"
+        except Exception as e:
+            self.last_error = "init_failed"
+            log.warning("Spotify interactive authorization failed: %s", e)
 
     def is_available(self) -> bool:
         if self._sp is None:
