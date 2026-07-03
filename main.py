@@ -65,31 +65,14 @@ _OWN_CONSOLE_ENV = "ETERNALRP_OWN_CONSOLE"
 
 def _create_default_config() -> None:
     """Write a starter config.py next to the exe/script if one doesn't exist."""
-    cfg_path = os.path.join(_app_dir, "config.py")
+    cfg_path = _config_path()
     if os.path.isfile(cfg_path):
         return
     try:
+        from utils import render_config, write_config_file
+
         cid = EMBEDDED_CLIENT_ID or PLACEHOLDER_CLIENT_ID
-        with open(cfg_path, "w", encoding="utf-8") as f:
-            f.write(
-                "# Discord application Client ID (uses built-in if set).\n"
-                f'CLIENT_ID = "{cid}"\n'
-                "\n"
-                f'ASSET_KEY = "{DEFAULT_ASSET_KEY}"\n'
-                "\n"
-                "# Optional: Spotify credentials (leave empty to disable).\n"
-                'SPOTIFY_CLIENT_ID = ""\n'
-                'SPOTIFY_CLIENT_SECRET = ""\n'
-                f'SPOTIFY_REDIRECT_URI = "{DEFAULT_SPOTIFY_REDIRECT_URI}"\n'
-                "\n"
-                '# Privacy: auto-accept Discord "Listen Along" join requests.\n'
-                "# Set to False to ignore join requests from people who click Join.\n"
-                "AUTO_ACCEPT_JOIN_REQUESTS = True\n"
-                "\n"
-                "# Privacy: upload album art to a public host so Discord can show it.\n"
-                "# Set to False to use the static app icon instead.\n"
-                "COVER_ART_UPLOAD = True\n"
-            )
+        write_config_file(render_config(client_id=cid), cfg_path)
         log.info("Created default config.py at %s", cfg_path)
     except Exception as e:
         log.error("Failed to create config.py: %s", e)
@@ -112,17 +95,9 @@ def _msgbox(text: str, title: str = APP_NAME, info: bool = False) -> None:
 
 def _icon_path() -> Optional[str]:
     """Resolve the tray icon image, checking PyInstaller bundle first."""
-    if getattr(sys, "frozen", False):
-        meipass = os.path.join(getattr(sys, "_MEIPASS", ""), _ICON_NAME)
-        if os.path.isfile(meipass):
-            return meipass
-        beside_exe = os.path.join(os.path.dirname(os.path.abspath(sys.executable)), _ICON_NAME)
-        if os.path.isfile(beside_exe):
-            return beside_exe
-    src = os.path.join(os.path.dirname(os.path.abspath(__file__)), _ICON_NAME)
-    if os.path.isfile(src):
-        return src
-    return None
+    from utils import resource_path
+
+    return resource_path(_ICON_NAME)
 
 
 def _load_tray_icon() -> "Image.Image":
@@ -164,7 +139,27 @@ def _restart_self() -> None:
 
 
 def _config_path() -> str:
-    return os.path.join(_app_dir, "config.py")
+    from app_info import config_path
+
+    return config_path()
+
+
+def _copy_to_clipboard(text: str) -> bool:
+    """Copy ``text`` to the Windows clipboard via clip.exe.
+
+    clip.exe reads console-encoding bytes unless the stream starts with a
+    UTF-16 BOM; piping UTF-8 pasted non-ASCII paths/links as mojibake."""
+    try:
+        subprocess.run(
+            ["clip"],
+            input=text.encode("utf-16"),
+            check=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+        )
+        return True
+    except Exception as e:
+        log.warning("Clipboard copy failed: %s", e)
+        return False
 
 
 def _open_path(path: str) -> None:
@@ -217,7 +212,8 @@ def _build_spotify_provider():
     """
     try:
         from config import SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET
-    except ImportError:
+    except Exception:
+        # Covers a missing config.py and one corrupted by hand-editing alike.
         return None
     if not (SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET):
         return None
@@ -350,6 +346,12 @@ def run_host_mode() -> int:
         needs_setup = not CLIENT_ID or CLIENT_ID == PLACEHOLDER_CLIENT_ID
     except ImportError:
         needs_setup = True
+    except Exception as e:
+        # A hand-edited config.py with a syntax error must route into the
+        # setup GUI (which rewrites the file), not crash every launch — the
+        # app itself tells users to edit config.py in Notepad.
+        log.warning("config.py is unreadable (%s); opening setup", e)
+        needs_setup = True
 
     if needs_setup:
         log.info("Config missing or incomplete — launching setup GUI")
@@ -411,7 +413,7 @@ def run_host_mode() -> int:
 
     try:
         from config import ASSET_KEY
-    except ImportError:
+    except Exception:
         ASSET_KEY = DEFAULT_ASSET_KEY
 
     from presence import DiscordConnectionError, DiscordPresence
@@ -652,13 +654,9 @@ def run_host_mode() -> int:
                 )
 
         def on_copy_log_path(_icon, _item):
-            try:
-                subprocess.run(
-                    ["clip"], input=LOG_PATH.encode(), check=True, creationflags=0x08000000
-                )
+            if _copy_to_clipboard(LOG_PATH):
                 log.debug("Log path copied to clipboard")
-            except Exception as e:
-                log.warning("Clipboard copy failed: %s", e)
+            else:
                 _msgbox(f"Log path:\n{LOG_PATH}")
 
         def on_help(_icon, _item):
@@ -710,11 +708,9 @@ def run_host_mode() -> int:
                     info=True,
                 )
                 return
-            try:
-                subprocess.run(["clip"], input=link.encode(), check=True, creationflags=0x08000000)
+            if _copy_to_clipboard(link):
                 log.info("Listen Along link copied: %s", link)
-            except Exception as e:
-                log.warning("Clipboard copy failed: %s — showing link in dialog", e)
+            else:
                 _msgbox(f"Listen Along link:\n{link}", info=True)
 
         def on_log_join_secret(_icon, _item):

@@ -14,22 +14,22 @@ their Discord Client ID and optional Spotify credentials without
 touching a text editor.
 """
 
-import os
 import tkinter as tk
 import webbrowser
 from tkinter import font as tkfont
+from typing import Optional
 
 from app_info import (
     APP_AUTHOR,
     APP_NAME,
     APP_REPO_URL,
     DEFAULT_ASSET_KEY,
-    DEFAULT_SPOTIFY_REDIRECT_URI,
     EMBEDDED_CLIENT_ID,
     PLACEHOLDER_CLIENT_ID,
-    app_root,
+    config_path,
 )
 from logger import get_logger
+from utils import read_config_values, render_config, resource_path, write_config_file
 
 log = get_logger("erp.setup_gui")
 
@@ -45,54 +45,55 @@ _ENTRY_BORDER = "#0f3460"
 
 
 def _write_config(
-    client_id: str, asset_key: str, sp_id: str, sp_secret: str, sp_redirect: str
+    client_id: str,
+    asset_key: str,
+    sp_id: str,
+    sp_secret: str,
+    sp_redirect: str,
+    cfg_path: Optional[str] = None,
 ) -> str:
     """Write config.py and return the file path.
 
-    Values are written with ``!r`` so a quote/backslash/newline in any field
-    becomes a safe Python string literal instead of corrupting config.py.
+    Rendering goes through utils.render_config — repr-escaped values and the
+    full canonical key set — and settings the GUI doesn't edit are preserved
+    from the existing file (rewriting used to silently reset the
+    AUTO_ACCEPT_JOIN_REQUESTS / COVER_ART_UPLOAD privacy toggles). The write
+    is atomic, so a failure mid-save can't leave a truncated config.py.
     """
-    cfg_path = os.path.join(app_root(), "config.py")
-    lines = [
-        f"CLIENT_ID = {client_id.strip()!r}",
-        f"ASSET_KEY = {(asset_key.strip() or DEFAULT_ASSET_KEY)!r}",
-        "",
-        f"SPOTIFY_CLIENT_ID = {sp_id.strip()!r}",
-        f"SPOTIFY_CLIENT_SECRET = {sp_secret.strip()!r}",
-        f"SPOTIFY_REDIRECT_URI = {(sp_redirect.strip() or DEFAULT_SPOTIFY_REDIRECT_URI)!r}",
-        "",
-    ]
-    with open(cfg_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
+    cfg_path = cfg_path or config_path()
+    existing = read_config_values(cfg_path)
+    content = render_config(
+        client_id=client_id,
+        asset_key=asset_key,
+        spotify_client_id=sp_id,
+        spotify_client_secret=sp_secret,
+        spotify_redirect_uri=sp_redirect,
+        auto_accept_join_requests=existing["AUTO_ACCEPT_JOIN_REQUESTS"],
+        cover_art_upload=existing["COVER_ART_UPLOAD"],
+    )
+    write_config_file(content, cfg_path)
     log.info("config.py saved at %s", cfg_path)
     return cfg_path
 
 
 def _load_existing() -> dict:
-    """Try to read current config.py values, return defaults for missing keys."""
-    defaults = {
-        "CLIENT_ID": EMBEDDED_CLIENT_ID or "",
-        "ASSET_KEY": DEFAULT_ASSET_KEY,
-        "SPOTIFY_CLIENT_ID": "",
-        "SPOTIFY_CLIENT_SECRET": "",
-        "SPOTIFY_REDIRECT_URI": DEFAULT_SPOTIFY_REDIRECT_URI,
+    """Current config values for prefilling the form (defaults when absent)."""
+    values = read_config_values()
+    out = {
+        key: str(values[key])
+        for key in (
+            "CLIENT_ID",
+            "ASSET_KEY",
+            "SPOTIFY_CLIENT_ID",
+            "SPOTIFY_CLIENT_SECRET",
+            "SPOTIFY_REDIRECT_URI",
+        )
     }
-    cfg_path = os.path.join(app_root(), "config.py")
-    if not os.path.isfile(cfg_path):
-        return defaults
-    ns: dict = {}
-    try:
-        with open(cfg_path, encoding="utf-8") as f:
-            exec(compile(f.read(), cfg_path, "exec"), ns)
-    except Exception:
-        return defaults
-    for key in defaults:
-        val = ns.get(key, "")
-        if val and val != PLACEHOLDER_CLIENT_ID:
-            defaults[key] = str(val)
-    if not (defaults["CLIENT_ID"] and defaults["CLIENT_ID"] != PLACEHOLDER_CLIENT_ID):
-        defaults["CLIENT_ID"] = EMBEDDED_CLIENT_ID or ""
-    return defaults
+    if not out["CLIENT_ID"] or out["CLIENT_ID"] == PLACEHOLDER_CLIENT_ID:
+        out["CLIENT_ID"] = EMBEDDED_CLIENT_ID or ""
+    if not out["ASSET_KEY"]:
+        out["ASSET_KEY"] = DEFAULT_ASSET_KEY
+    return out
 
 
 def run_setup_gui() -> bool:
@@ -102,20 +103,48 @@ def run_setup_gui() -> bool:
     root = tk.Tk()
     root.title(f"{APP_NAME} — Setup")
     root.configure(bg=_BG)
-    root.resizable(False, False)
+    root.resizable(False, True)
 
-    win_w, win_h = 620, 760
+    # Fit short/DPI-scaled displays: the form scrolls and the Save bar stays
+    # pinned at the bottom, so nothing is ever clipped off-screen.
+    win_w = 620
+    win_h = min(760, root.winfo_screenheight() - 80)
     sx = root.winfo_screenwidth() // 2 - win_w // 2
-    sy = root.winfo_screenheight() // 2 - win_h // 2
+    sy = max(0, root.winfo_screenheight() // 2 - win_h // 2)
     root.geometry(f"{win_w}x{win_h}+{sx}+{sy}")
 
     try:
-        icon_path = os.path.join(app_root(), "Apple_Music_Icon.png")
-        if os.path.isfile(icon_path):
+        # resource_path also finds the icon inside a frozen build's _MEIPASS,
+        # where the release exe actually ships it.
+        icon_path = resource_path("Apple_Music_Icon.png")
+        if icon_path:
             _photo = tk.PhotoImage(file=icon_path)
             root.iconphoto(True, _photo)
     except Exception:
         pass
+
+    # Fixed bottom bar (status + buttons + footer) packed first so it always
+    # keeps its space; everything above lives in a scrollable canvas.
+    bottom = tk.Frame(root, bg=_BG)
+    bottom.pack(side="bottom", fill="x")
+
+    scroll_area = tk.Frame(root, bg=_BG)
+    scroll_area.pack(side="top", fill="both", expand=True)
+    canvas = tk.Canvas(scroll_area, bg=_BG, highlightthickness=0, bd=0)
+    scrollbar = tk.Scrollbar(scroll_area, orient="vertical", command=canvas.yview)
+    content = tk.Frame(canvas, bg=_BG)
+    content_id = canvas.create_window((0, 0), window=content, anchor="nw")
+    content.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+    canvas.bind("<Configure>", lambda e: canvas.itemconfigure(content_id, width=e.width))
+    canvas.configure(yscrollcommand=scrollbar.set)
+    canvas.pack(side="left", fill="both", expand=True)
+    scrollbar.pack(side="right", fill="y")
+
+    def _on_mousewheel(event):
+        step = int(-event.delta / 120) or (-1 if event.delta > 0 else 1)
+        canvas.yview_scroll(step, "units")
+
+    canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
     title_font = tkfont.Font(family="Segoe UI", size=18, weight="bold")
     subtitle_font = tkfont.Font(family="Segoe UI", size=9)
@@ -124,7 +153,7 @@ def run_setup_gui() -> bool:
     btn_font = tkfont.Font(family="Segoe UI", size=11, weight="bold")
     small_font = tkfont.Font(family="Segoe UI", size=8)
 
-    header = tk.Frame(root, bg=_BG)
+    header = tk.Frame(content, bg=_BG)
     header.pack(fill="x", padx=30, pady=(24, 4))
 
     tk.Label(
@@ -144,7 +173,7 @@ def run_setup_gui() -> bool:
         anchor="w",
     ).pack(anchor="w")
 
-    sep = tk.Frame(root, bg=_ACCENT, height=2)
+    sep = tk.Frame(content, bg=_ACCENT, height=2)
     sep.pack(fill="x", padx=30, pady=(12, 16))
 
     existing = _load_existing()
@@ -189,7 +218,7 @@ def run_setup_gui() -> bool:
         )
     )
     intro = tk.Label(
-        root,
+        content,
         text=intro_text,
         font=label_font,
         fg=_FG,
@@ -201,7 +230,7 @@ def run_setup_gui() -> bool:
     intro.pack(fill="x", padx=30, pady=(0, 16))
 
     discord_card = tk.Frame(
-        root, bg=_BG_FIELD, highlightthickness=1, highlightbackground=_ENTRY_BORDER
+        content, bg=_BG_FIELD, highlightthickness=1, highlightbackground=_ENTRY_BORDER
     )
     discord_card.pack(fill="x", padx=30, pady=(0, 14))
 
@@ -260,7 +289,7 @@ def run_setup_gui() -> bool:
     ).pack(side="left")
 
     spotify_card = tk.Frame(
-        root, bg=_BG_FIELD, highlightthickness=1, highlightbackground=_ENTRY_BORDER
+        content, bg=_BG_FIELD, highlightthickness=1, highlightbackground=_ENTRY_BORDER
     )
     spotify_card.pack(fill="x", padx=30, pady=(0, 12))
 
@@ -340,7 +369,7 @@ def run_setup_gui() -> bool:
     ).pack(side="left", padx=(10, 0))
 
     tray_hint = tk.Label(
-        root,
+        content,
         text=(
             "After saving, the app will launch in your system tray. Right-click "
             "the tray icon for controls and troubleshooting."
@@ -356,7 +385,7 @@ def run_setup_gui() -> bool:
 
     status_var = tk.StringVar(value="")
     status_label = tk.Label(
-        root,
+        bottom,
         textvariable=status_var,
         font=small_font,
         fg=_ACCENT,
@@ -370,6 +399,11 @@ def run_setup_gui() -> bool:
         if not cid or cid == PLACEHOLDER_CLIENT_ID:
             status_var.set("Discord Client ID is required.")
             return
+        if not cid.isdigit():
+            status_var.set(
+                "Discord Client ID must be a number — copy it from the Developer Portal."
+            )
+            return
         asset_key = fields["ASSET_KEY"].get().strip()
         if not asset_key:
             status_var.set("Discord Art Asset Key is required.")
@@ -382,7 +416,8 @@ def run_setup_gui() -> bool:
         if any(spotify_values) and not all(spotify_values):
             status_var.set("Fill in both Spotify Client ID and Client Secret, or leave both blank.")
             return
-        if any(spotify_values) and not sp_redirect.startswith(("http://", "https://")):
+        # Blank is fine — the writer substitutes the default redirect URI.
+        if sp_redirect and not sp_redirect.startswith(("http://", "https://")):
             status_var.set("Spotify Redirect URI must start with http:// or https://")
             return
         try:
@@ -399,7 +434,7 @@ def run_setup_gui() -> bool:
             status_var.set(f"Save failed: {e}")
             log.error("Setup GUI save failed: %s", e)
 
-    btn_frame = tk.Frame(root, bg=_BG)
+    btn_frame = tk.Frame(bottom, bg=_BG)
     btn_frame.pack(fill="x", padx=30, pady=(8, 0))
 
     save_btn = tk.Button(
@@ -438,7 +473,7 @@ def run_setup_gui() -> bool:
     help_btn.pack(side="right")
 
     footer = tk.Label(
-        root,
+        bottom,
         text="github.com/whoisaldo/Eternal-Rich-Presence",
         font=small_font,
         fg=_FG_DIM,

@@ -64,6 +64,47 @@ def test_missing_track():
     assert err == "missing_track"
 
 
+def test_literal_percent_sequences_round_trip():
+    # parse_qs already decodes once; a second unquote used to corrupt titles
+    # containing literal %XX sequences ("100%25 Done" became "100% Done").
+    secret = build_join_secret("100%25 Done", "A%20B", 5)
+    parsed, err = parse_join_secret(secret)
+    assert err is None
+    assert parsed["track"] == "100%25 Done"
+    assert parsed["artist"] == "A%20B"
+    assert parsed["position_sec"] == 5
+
+
+def test_lone_surrogate_does_not_crash():
+    # Lone UTF-16 surrogates can leak out of Windows metadata; they must
+    # degrade to "?" instead of raising UnicodeEncodeError.
+    secret = build_join_secret("bad\ud800title", "art\udfffist", 0)
+    assert len(secret) <= 128
+    parsed, err = parse_join_secret(secret)
+    assert err is None
+    assert "bad" in parsed["track"]
+
+
+def test_legacy_no_query_path():
+    parsed, err = parse_join_secret("eternalrp://Bohemian%20Rhapsody")
+    assert err is None
+    assert parsed["track"] == "Bohemian Rhapsody"
+    assert parsed["artist"] == ""
+    assert parsed["position_sec"] == 0
+
+
+def test_invalid_position_rejected():
+    parsed, err = parse_join_secret("eternalrp://sync?track=x&pos=abc")
+    assert parsed is None
+    assert err == "invalid_position"
+
+
+def test_negative_position_clamped_to_zero():
+    parsed, err = parse_join_secret("eternalrp://sync?track=xy&pos=-5")
+    assert err is None
+    assert parsed["position_sec"] == 0
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

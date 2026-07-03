@@ -13,10 +13,118 @@ import urllib.parse
 import urllib.request
 from typing import Callable, Optional
 
-from app_info import APP_NAME
+from app_info import (
+    APP_NAME,
+    DEFAULT_ASSET_KEY,
+    DEFAULT_SPOTIFY_REDIRECT_URI,
+    config_path,
+)
 from logger import get_logger
 
 log = get_logger("erp.utils")
+
+# ---------------------------------------------------------------------------
+# config.py rendering — the ONE place that knows the full key set.
+# Three hand-maintained templates (config.example.py, main's default writer,
+# the setup GUI's writer) previously drifted apart: the GUI silently dropped
+# the privacy toggles on every save. Every writer now goes through here.
+# ---------------------------------------------------------------------------
+
+_CONFIG_DEFAULTS = {
+    "CLIENT_ID": "",
+    "ASSET_KEY": DEFAULT_ASSET_KEY,
+    "SPOTIFY_CLIENT_ID": "",
+    "SPOTIFY_CLIENT_SECRET": "",
+    "SPOTIFY_REDIRECT_URI": DEFAULT_SPOTIFY_REDIRECT_URI,
+    "AUTO_ACCEPT_JOIN_REQUESTS": True,
+    "COVER_ART_UPLOAD": True,
+}
+
+
+def render_config(
+    client_id: str,
+    asset_key: str = DEFAULT_ASSET_KEY,
+    spotify_client_id: str = "",
+    spotify_client_secret: str = "",
+    spotify_redirect_uri: str = DEFAULT_SPOTIFY_REDIRECT_URI,
+    auto_accept_join_requests: bool = True,
+    cover_art_upload: bool = True,
+) -> str:
+    """Render the canonical config.py contents.
+
+    Values are emitted with ``repr()`` so a quote/backslash/newline in any
+    user-facing field becomes a safe Python literal instead of corrupting the
+    file (a project guardrail).
+    """
+    redirect = str(spotify_redirect_uri).strip() or DEFAULT_SPOTIFY_REDIRECT_URI
+    return (
+        "# Discord application Client ID (uses built-in if set).\n"
+        f"CLIENT_ID = {str(client_id).strip()!r}\n"
+        "\n"
+        "# Rich Presence art asset key (Dev Portal > Rich Presence > Art Assets).\n"
+        f"ASSET_KEY = {(str(asset_key).strip() or DEFAULT_ASSET_KEY)!r}\n"
+        "\n"
+        "# Spotify Web API credentials (leave empty to disable Spotify).\n"
+        f"SPOTIFY_CLIENT_ID = {str(spotify_client_id).strip()!r}\n"
+        f"SPOTIFY_CLIENT_SECRET = {str(spotify_client_secret).strip()!r}\n"
+        f"SPOTIFY_REDIRECT_URI = {redirect!r}\n"
+        "\n"
+        '# Privacy: auto-accept Discord "Listen Along" join requests.\n'
+        "# Set to False to ignore join requests from people who click Join.\n"
+        f"AUTO_ACCEPT_JOIN_REQUESTS = {bool(auto_accept_join_requests)!r}\n"
+        "\n"
+        "# Privacy: upload album art to a public host so Discord can show it.\n"
+        "# Set to False to use the static app icon instead.\n"
+        f"COVER_ART_UPLOAD = {bool(cover_art_upload)!r}\n"
+    )
+
+
+def read_config_values(path: Optional[str] = None) -> dict:
+    """Tolerantly read config.py, returning defaults for anything missing or
+    broken. Used to preserve settings (e.g. the privacy toggles) across
+    rewrites and to prefill the setup GUI."""
+    values = dict(_CONFIG_DEFAULTS)
+    path = path or config_path()
+    if not os.path.isfile(path):
+        return values
+    ns: dict = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            exec(compile(f.read(), path, "exec"), ns)
+    except Exception as e:
+        log.warning("config.py could not be read (%s); using defaults", e)
+        return values
+    for key, default in _CONFIG_DEFAULTS.items():
+        if key in ns and ns[key] is not None:
+            values[key] = bool(ns[key]) if isinstance(default, bool) else str(ns[key])
+    return values
+
+
+def write_config_file(content: str, path: Optional[str] = None) -> str:
+    """Atomically write config.py (temp file + rename), returning its path.
+
+    A crash mid-write must never leave a truncated config.py behind."""
+    path = path or config_path()
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        f.write(content)
+    os.replace(tmp_path, path)
+    return path
+
+
+def resource_path(name: str) -> Optional[str]:
+    """Locate a bundled resource: PyInstaller _MEIPASS first, then beside the
+    exe, then the source tree. Returns None if the file doesn't exist."""
+    if getattr(sys, "frozen", False):
+        meipass = os.path.join(getattr(sys, "_MEIPASS", ""), name)
+        if os.path.isfile(meipass):
+            return meipass
+        beside = os.path.join(os.path.dirname(os.path.abspath(sys.executable)), name)
+        if os.path.isfile(beside):
+            return beside
+    src = os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
+    return src if os.path.isfile(src) else None
+
 
 # catbox/litterbox reject some non-browser User-Agents, so uploads use a
 # browser-like UA. 0x0 accepts anything; keeping it uniform avoids three copies.
@@ -164,7 +272,10 @@ def _encode_within(text: str, max_encoded_len: int) -> str:
         return ""
     encoded = ""
     for ch in text:
-        piece = urllib.parse.quote(ch, safe="")
+        # errors="replace": a lone UTF-16 surrogate in provider metadata must
+        # degrade to "?" instead of raising UnicodeEncodeError and killing the
+        # presence update for the whole track.
+        piece = urllib.parse.quote(ch, safe="", errors="replace")
         if len(encoded) + len(piece) > max_encoded_len:
             break
         encoded += piece
@@ -217,10 +328,12 @@ def parse_join_secret(uri: str) -> tuple[Optional[dict], Optional[str]]:
         return None, "missing_track"
 
     _, query = payload.split("?", 1)
+    # parse_qs already percent-decodes values; decoding a second time corrupted
+    # titles containing literal %XX sequences ("100%25 off" became "100% off").
     params = urllib.parse.parse_qs(query, keep_blank_values=True)
 
-    track = urllib.parse.unquote((params.get("track") or [""])[0]).strip()
-    artist = urllib.parse.unquote((params.get("artist") or [""])[0]).strip()
+    track = ((params.get("track") or [""])[0]).strip()
+    artist = ((params.get("artist") or [""])[0]).strip()
     raw_pos = (params.get("pos") or ["0"])[0]
 
     try:
@@ -238,6 +351,20 @@ def parse_join_secret(uri: str) -> tuple[Optional[dict], Optional[str]]:
     }, None
 
 
+def _protocol_command(exe_path: Optional[str] = None) -> str:
+    """Build the shell command a protocol handler should invoke.
+
+    When running from source, the interpreter alone would swallow the URI
+    (python.exe would try to execute it as a script), so the entry script is
+    included — mirroring how _restart_self relaunches the app."""
+    if exe_path:
+        return f'"{os.path.abspath(exe_path)}" "%1"'
+    if getattr(sys, "frozen", False):
+        return f'"{os.path.abspath(sys.executable)}" "%1"'
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.py")
+    return f'"{os.path.abspath(sys.executable)}" "{script}" "%1"'
+
+
 def register_uri_scheme(exe_path: Optional[str] = None, silent: bool = False) -> bool:
     """Register the eternalrp:// protocol handler for the current Windows user."""
     try:
@@ -247,8 +374,7 @@ def register_uri_scheme(exe_path: Optional[str] = None, silent: bool = False) ->
             print("Registry access requires Windows.", file=sys.stderr)
         return False
 
-    cmd = os.path.abspath(exe_path or sys.executable)
-    command = f'"{cmd}" "%1"'
+    command = _protocol_command(exe_path)
 
     try:
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"SOFTWARE\Classes\eternalrp") as k:
@@ -281,10 +407,11 @@ def register_discord_launch(
     try:
         import winreg
     except ImportError:
+        if not silent:
+            print("Registry access requires Windows.", file=sys.stderr)
         return False
 
-    cmd = os.path.abspath(exe_path or sys.executable)
-    command = f'"{cmd}" "%1"'
+    command = _protocol_command(exe_path)
     protocol = f"discord-{client_id}"
 
     try:

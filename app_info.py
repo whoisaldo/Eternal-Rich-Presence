@@ -30,7 +30,9 @@ DEFAULT_ASSET_KEY = "apple_music"
 
 # Default Spotify OAuth redirect. Single source of truth for the literal that
 # used to be repeated across main.py / setup_gui.py / config templates.
-DEFAULT_SPOTIFY_REDIRECT_URI = "http://localhost:8888/callback"
+# Spotify's 2025 policy rejects "localhost" for new apps: redirect URIs must
+# use an explicit loopback IP (or HTTPS), so the default is 127.0.0.1.
+DEFAULT_SPOTIFY_REDIRECT_URI = "http://127.0.0.1:8888/callback"
 
 # Canonical placeholder Client ID, used wherever code asks "is this config still
 # unconfigured?" — defined once so the literal cannot drift across modules.
@@ -57,3 +59,8 @@ def app_root() -> str:
     if getattr(sys, "frozen", False):
         return os.path.dirname(os.path.abspath(sys.executable))
     return os.path.dirname(os.path.abspath(__file__))
+
+
+def config_path() -> str:
+    """Canonical location of config.py (beside the exe / repo root)."""
+    return os.path.join(app_root(), "config.py")
