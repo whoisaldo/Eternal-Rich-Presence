@@ -23,7 +23,7 @@ APP_VERSION_DISPLAY = "2.0"
 
 APP_AUTHOR = "Ali Younes (@whoisaldo)"
 APP_REPO_URL = "https://github.com/whoisaldo/Eternal-Rich-Presence"
-APP_SUPPORT_EMAIL = "Aliyounes@eternalreverse.com"
+APP_SUPPORT_EMAIL = "hello@sideband.studio"
 
 DEFAULT_ASSET_KEY = "apple_music"
 

@@ -154,8 +154,8 @@ build.ps1            Portable PyInstaller build script
 
 EternalRichPresence is free software, licensed under the [GNU General Public License v3.0](LICENSE). You are free to use, study, share, and modify it. Redistributed forks and derivative works must also be licensed under GPL-3.0 and keep their source open — see [LICENSE](LICENSE) for the full terms.
 
-The **EternalRichPresence** and **Eternal Reverse** names and the project logo/branding are **not** covered by the GPL and remain the property of Ali Younes (@whoisaldo). Forks must use a different name and logo and must not imply endorsement — see [TRADEMARK.md](TRADEMARK.md).
+The **EternalRichPresence** and **Sideband** names and the project logo/branding are **not** covered by the GPL and remain the property of Ali Younes (@whoisaldo). Forks must use a different name and logo and must not imply endorsement — see [TRADEMARK.md](TRADEMARK.md).
 
 Copyright (C) 2026 Ali Younes ([@whoisaldo](https://github.com/whoisaldo))
 
-For support, licensing inquiries, or business contact: **Aliyounes@eternalreverse.com**
+For support, licensing inquiries, or business contact: **hello@sideband.studio**
